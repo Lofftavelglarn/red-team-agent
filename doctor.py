@@ -18,10 +18,13 @@ def _check(name: str, fn) -> bool:
 def main() -> None:
     from redteam.config import (
         AGENT_BASE_URL,
+        ALLOW_FULL_RESET,
         MONGO_DB,
         MONGO_URI,
         REDIS_URL,
         model_config,
+        redis_db_number,
+        safe_mongo_uri,
         target_api_keys,
     )
 
@@ -55,7 +58,15 @@ def main() -> None:
             raise RuntimeError("PING returned false")
         return "PING"
 
-    checks = [_check("target credentials", target_config)]
+    def cleanup_config():
+        from redteam.config import resolve_cleanup_mode
+        mode = resolve_cleanup_mode()
+        return (f"mode={mode}, Mongo target={safe_mongo_uri()} / {MONGO_DB}, "
+                f"Redis target=db {redis_db_number()}, "
+                f"full reset allowed={'yes' if ALLOW_FULL_RESET else 'no'}")
+
+    checks = [_check("cleanup config", cleanup_config),
+              _check("target credentials", target_config)]
     if int(os.getenv("REDTEAM_LOOP", "0")) > 0:
         checks.append(_check("attacker model config", lambda: model("attacker")))
     checks.extend([
