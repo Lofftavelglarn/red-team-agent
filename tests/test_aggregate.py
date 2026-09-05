@@ -6,7 +6,12 @@ import json
 import os
 
 from redteam.aggregate import aggregate
-from redteam.models import Checkpoint, CheckpointStatus, RunStatus
+from redteam.models import (
+    RESULT_SCHEMA_VERSION,
+    Checkpoint,
+    CheckpointStatus,
+    RunStatus,
+)
 
 CP = Checkpoint
 
@@ -21,7 +26,8 @@ def _cp(name, value):
 def _run(run_dir, rid, status, cps, meta=None):
     d = os.path.join(run_dir, rid)
     os.makedirs(d, exist_ok=True)
-    result = {"scenario_id": "s", "run_id": rid, "status": status,
+    result = {"schema_version": RESULT_SCHEMA_VERSION,
+              "scenario_id": "s", "run_id": rid, "status": status,
               "checkpoints": {k: _cp(k, v) for k, v in cps.items()},
               "attempts": [], "meta": meta or {}}
     with open(os.path.join(d, "result.json"), "w", encoding="utf-8") as f:
@@ -194,3 +200,37 @@ def test_legacy_iterations_become_mutations_not_candidates(tmp_path):
     rep = aggregate(rd)
     assert rep["avg_candidate_attempts"] == 1.0
     assert rep["avg_mutation_iterations"] == 0.0
+
+
+def test_excluded_observations_are_visible_per_metric(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value, {CP.STORED_GLOBAL.value: "reached"})
+    _run(rd, "r2", RunStatus.COMPLETED.value, {CP.STORED_GLOBAL.value: "evaluation_error"})
+    _run(rd, "r3", RunStatus.COMPLETED.value, {CP.STORED_GLOBAL.value: "unobserved"})
+    _run(rd, "r4", RunStatus.COMPLETED.value, {CP.STORED_GLOBAL.value: "not_applicable"})
+    pg = aggregate(rd)["rates"]["persistence_global"]
+    assert pg["observed"] == 1 and pg["reached"] == 1
+    assert pg["excluded"] == {"not_applicable": 1, "unobserved": 1, "evaluation_error": 1}
+
+
+def test_end_to_end_reports_where_path_breaks(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": False,
+          "first_failed_required_checkpoint": CP.STORED_GLOBAL.value})
+    _run(rd, "r2", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": True, "first_failed_required_checkpoint": None})
+    e2e = aggregate(rd)["rates"]["end_to_end"]
+    assert e2e["reached"] == 1 and e2e["observed"] == 2 and e2e["rate"] == 0.5
+    assert e2e["first_failed_required_checkpoint"] == {CP.STORED_GLOBAL.value: 1}
+
+
+def test_observability_block_collects_denominator_context(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value,
+         {CP.STORED_GLOBAL.value: ("evaluation_error", "judge")})
+    _run(rd, "r2", RunStatus.INFRA_ERROR.value, {})
+    obs = aggregate(rd)["observability"]
+    assert obs["judge_evaluations"] == 1 and obs["judge_errors"] == 1
+    assert obs["infrastructure_error_rate"] == 0.5
+    assert obs["result_schema_versions"] == {"2.1": 2}

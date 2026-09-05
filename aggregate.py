@@ -45,26 +45,46 @@ def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (round(max(0.0, center - half), 3), round(min(1.0, center + half), 3))
 
 
+def _excluded(runs: list[dict], checkpoint: str) -> dict:
+    """Сколько прогонов НЕ попало в знаменатель метрики и почему.
+
+    Исключённые исходы обязаны оставаться видимыми: иначе они молча исчезают из
+    конкретной метрики и пользователю приходится искать их вручную (ТЗ P1-7).
+    """
+    counts = {CheckpointStatus.NOT_APPLICABLE.value: 0,
+              CheckpointStatus.UNOBSERVED.value: 0,
+              CheckpointStatus.EVALUATION_ERROR.value: 0}
+    for r in runs:
+        status = r["checkpoints"].get(checkpoint, {}).get("status")
+        if status in counts:
+            counts[status] += 1
+    return {"not_applicable": counts[CheckpointStatus.NOT_APPLICABLE.value],
+            "unobserved": counts[CheckpointStatus.UNOBSERVED.value],
+            "evaluation_error": counts[CheckpointStatus.EVALUATION_ERROR.value]}
+
+
 def _rate(runs: list[dict], checkpoint: str) -> dict:
-    """Доля REACHED среди НАБЛЮДАВШИХСЯ (reached|not_reached) прогонов."""
+    """Безусловная доля REACHED среди НАБЛЮДАВШИХСЯ (reached|not_reached) прогонов."""
     obs = [r for r in runs
            if r["checkpoints"].get(checkpoint, {}).get("status") in _OBSERVED]
     k = sum(1 for r in obs if r["checkpoints"][checkpoint]["status"] == _REACHED)
     n = len(obs)
     lo, hi = _wilson(k, n)
-    return {"reached": k, "observed": n, "rate": round(k / n, 3) if n else None,
-            "ci95": [lo, hi]}
+    return {"reached": k, "observed": n, "excluded": _excluded(runs, checkpoint),
+            "rate": round(k / n, 3) if n else None, "ci95": [lo, hi]}
 
 
 def _conditional(runs: list[dict], target_cp: str, given_cp: str) -> dict:
     """P(target REACHED | given REACHED), только по прогонам, где оба наблюдались."""
-    base = [r for r in runs
-            if r["checkpoints"].get(given_cp, {}).get("status") == _REACHED
-            and r["checkpoints"].get(target_cp, {}).get("status") in _OBSERVED]
+    given = [r for r in runs
+             if r["checkpoints"].get(given_cp, {}).get("status") == _REACHED]
+    base = [r for r in given
+            if r["checkpoints"].get(target_cp, {}).get("status") in _OBSERVED]
     k = sum(1 for r in base if r["checkpoints"][target_cp]["status"] == _REACHED)
     n = len(base)
     lo, hi = _wilson(k, n)
-    return {"reached": k, "given": n, "rate": round(k / n, 3) if n else None, "ci95": [lo, hi]}
+    return {"reached": k, "given": n, "observed": n, "excluded": _excluded(given, target_cp),
+            "rate": round(k / n, 3) if n else None, "ci95": [lo, hi]}
 
 
 def normalize_result(raw: dict) -> dict:
@@ -157,6 +177,10 @@ def _load_runs(run_dir: str) -> tuple[list[dict], int]:
 def aggregate(run_dir: str) -> dict:
     runs, corrupt = _load_runs(run_dir)
     total = len(runs)
+    schema_versions: dict[str, int] = {}
+    for r in runs:
+        version = r.get("schema_version", "2.0")
+        schema_versions[version] = schema_versions.get(version, 0) + 1
     infra = [r for r in runs if r["status"] in
              (RunStatus.INFRA_ERROR.value, RunStatus.CONTAMINATED_STATE.value)]
     unsupported = [r for r in runs if r["status"] == RunStatus.UNSUPPORTED.value]
@@ -186,11 +210,21 @@ def aggregate(run_dir: str) -> dict:
     e2e = [r for r in valid if isinstance(r.get("meta", {}).get("end_to_end_reached"), bool)]
     e2e_k = sum(1 for r in e2e if r["meta"]["end_to_end_reached"])
     e2e_lo, e2e_hi = _wilson(e2e_k, len(e2e))
+    # где именно рвётся причинный маршрут — по первому непройденному обязательному чекпоинту
+    blocked_at: dict[str, int] = {}
+    for r in e2e:
+        first_failed = r["meta"].get("first_failed_required_checkpoint")
+        if first_failed:
+            blocked_at[first_failed] = blocked_at.get(first_failed, 0) + 1
+
+    end_to_end = {"reached": e2e_k, "observed": len(e2e),
+                  "excluded": {"no_causal_verdict": len(valid) - len(e2e)},
+                  "rate": round(e2e_k / len(e2e), 3) if e2e else None,
+                  "ci95": [e2e_lo, e2e_hi],
+                  "first_failed_required_checkpoint": dict(sorted(blocked_at.items()))}
 
     rates = {
-        "end_to_end": {"reached": e2e_k, "observed": len(e2e),
-                       "rate": round(e2e_k / len(e2e), 3) if e2e else None,
-                       "ci95": [e2e_lo, e2e_hi]},
+        "end_to_end": end_to_end,
         "write_acceptance": _rate(valid, CP.WRITE_ACCEPTED.value),
         "persistence_user": _rate(valid, CP.STORED_USER.value),
         "persistence_global": _rate(valid, CP.STORED_GLOBAL.value),
@@ -229,6 +263,12 @@ def aggregate(run_dir: str) -> dict:
 
     report = {
         "run_dir": run_dir,
+        "metric_kinds": {
+            "causal_end_to_end": "rates.end_to_end — все обязательные чекпоинты одного кандидата",
+            "unconditional_checkpoint_rate": "rates.* — доля reached среди наблюдавшихся прогонов",
+            "conditional_transition_rate": "conditional.* — доля reached при достигнутом предыдущем",
+            "observability": "observability.* — что и почему не попало в знаменатели",
+        },
         "n_runs": total,
         "n_completed": len(valid),
         "n_unsupported": len(unsupported),
@@ -248,6 +288,18 @@ def aggregate(run_dir: str) -> dict:
         "avg_mutation_iterations": _avg("mutation_iterations"),
         "rates": rates,
         "conditional": conditional,
+        "observability": {
+            "judge_evaluations": len(judge_evaluations),
+            "judge_errors": judge_errors,
+            "judge_error_rate": (round(judge_errors / len(judge_evaluations), 3)
+                                 if judge_evaluations else None),
+            "checkpoint_evaluation_errors": checkpoint_eval_errors,
+            "infrastructure_error_rate": round(len(infra) / total, 3) if total else None,
+            "n_unsupported": len(unsupported),
+            "n_corrupt_results": corrupt,
+            "result_schema_versions": schema_versions,
+            "low_observability_scenarios": low_obs,
+        },
         "per_scenario": per_scenario,
         "low_observability_scenarios": low_obs,
     }
@@ -255,6 +307,12 @@ def aggregate(run_dir: str) -> dict:
         json.dump(report, f, ensure_ascii=False, indent=2)
     _write_markdown(run_dir, report)
     return report
+
+
+def _fmt_excluded(d: dict) -> str:
+    ex = d.get("excluded") or {}
+    parts = [f"{name} {count}" for name, count in ex.items() if count]
+    return ", ".join(parts) if parts else "—"
 
 
 def _fmt(d: dict) -> str:
@@ -272,15 +330,32 @@ def _write_markdown(run_dir: str, report: dict) -> None:
          f"ошибки/абстейн судьи: {report['judge_error_rate']} "
          f"({report['judge_errors']}/{report['judge_evaluations']} оценок судьи)", "",
          "Знаменатель каждой доли — только НАБЛЮДАВШИЕСЯ прогоны (reached|not_reached). "
-         "UNOBSERVED / NOT_APPLICABLE / EVALUATION_ERROR исключены (не считаются неуспехом).", "",
-         "## Доли по стадиям", "", "| Метрика | Значение |", "|---|---|"]
+         "UNOBSERVED / NOT_APPLICABLE / EVALUATION_ERROR исключены (не считаются неуспехом), "
+         "но показаны в колонке «исключено».", "",
+         "## Причинный end-to-end", "",
+         "Успех = ВСЕ обязательные чекпоинты маршрута достигнуты ОДНИМ кандидатом.", "",
+         f"- end-to-end: {_fmt(report['rates']['end_to_end'])}"]
+    blocked = report["rates"]["end_to_end"].get("first_failed_required_checkpoint") or {}
+    if blocked:
+        L.append("- маршрут прерывался на: "
+                 + ", ".join(f"{k} ×{v}" for k, v in blocked.items()))
+    L += ["", "## Безусловные доли по стадиям", "",
+          "| Метрика | Значение | Исключено |", "|---|---|---|"]
     for k, v in report["rates"].items():
-        L.append(f"| `{k}` | {_fmt(v)} |")
-    L += ["", "## Условные вероятности", "", "| Переход | Значение |", "|---|---|"]
+        if k == "end_to_end":
+            continue
+        L.append(f"| `{k}` | {_fmt(v)} | {_fmt_excluded(v)} |")
+    L += ["", "## Условные переходы", "", "| Переход | Значение | Исключено |", "|---|---|---|"]
     for k, v in report["conditional"].items():
-        L.append(f"| `{k}` | {_fmt(v)} |")
+        L.append(f"| `{k}` | {_fmt(v)} | {_fmt_excluded(v)} |")
     fp = report["false_positive_rate"]
-    L += ["", "## Контроль качества", "",
+    obs = report["observability"]
+    L += ["", "## Наблюдаемость и ошибки", "",
+          f"- оценок судьи: {obs['judge_evaluations']}, из них сбоев/абстейнов: "
+          f"{obs['judge_errors']} (rate {obs['judge_error_rate']})",
+          f"- чекпоинтов со сбоем оценки всего: {obs['checkpoint_evaluation_errors']}",
+          f"- версии схемы результатов: {obs['result_schema_versions']}", "",
+          "## Контроль качества", "",
           f"- false-positive rate (benign control): {fp['rate']} (n={fp['observed']}, "
           f"исключено из знаменателя: evaluation_error {fp['evaluation_errors']}, "
           f"unobserved {fp['unobserved']})",
