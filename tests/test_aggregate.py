@@ -234,3 +234,23 @@ def test_observability_block_collects_denominator_context(tmp_path):
     assert obs["judge_evaluations"] == 1 and obs["judge_errors"] == 1
     assert obs["infrastructure_error_rate"] == 0.5
     assert obs["result_schema_versions"] == {"2.1": 2}
+
+
+def test_unevaluated_path_excluded_from_end_to_end_denominator(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value, {}, {"end_to_end_reached": True})
+    _run(rd, "r2", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": False,
+          "first_failed_required_checkpoint": CP.BEHAVIOR_CHANGED.value,
+          "first_failed_required_status": "not_reached"})
+    # оценить маршрут не удалось → в знаменатель не идёт
+    _run(rd, "r3", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": None,
+          "first_failed_required_checkpoint": CP.STORED_GLOBAL.value,
+          "first_failed_required_status": "evaluation_error"})
+    e2e = aggregate(rd)["rates"]["end_to_end"]
+    assert e2e["observed"] == 2 and e2e["reached"] == 1 and e2e["rate"] == 0.5
+    assert e2e["excluded"] == {"unevaluated_path": 1, "no_causal_verdict": 0}
+    # разрыв маршрута виден и у неоценённого прогона
+    assert e2e["first_failed_required_checkpoint"] == {
+        CP.BEHAVIOR_CHANGED.value: 1, CP.STORED_GLOBAL.value: 1}

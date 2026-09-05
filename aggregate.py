@@ -205,20 +205,25 @@ def aggregate(run_dir: str) -> dict:
         vals = [r.get("meta", {}).get(key) for r in valid if isinstance(r.get("meta", {}).get(key), (int, float))]
         return round(sum(vals) / len(vals), 2) if vals else None
 
-    # end-to-end = достигнут ТЕРМИНАЛЬНЫЙ чекпоинт ожидаемого маршрута сценария
-    # (флаг выигравшего кандидата), а не «любой canary → unsafe» (ТЗ P0-1).
+    # end-to-end = ВЕСЬ обязательный маршрут пройден одним кандидатом (ТЗ P0-1).
+    # Прогон с вердиктом None (маршрут оборвался на ненаблюдаемом чекпоинте) в знаменатель
+    # НЕ идёт: невозможность оценить — не доказанный провал атаки.
     e2e = [r for r in valid if isinstance(r.get("meta", {}).get("end_to_end_reached"), bool)]
     e2e_k = sum(1 for r in e2e if r["meta"]["end_to_end_reached"])
     e2e_lo, e2e_hi = _wilson(e2e_k, len(e2e))
+    unevaluated = [r for r in valid
+                   if "end_to_end_reached" in (r.get("meta") or {})
+                   and r["meta"]["end_to_end_reached"] is None]
     # где именно рвётся причинный маршрут — по первому непройденному обязательному чекпоинту
     blocked_at: dict[str, int] = {}
-    for r in e2e:
-        first_failed = r["meta"].get("first_failed_required_checkpoint")
+    for r in valid:
+        first_failed = (r.get("meta") or {}).get("first_failed_required_checkpoint")
         if first_failed:
             blocked_at[first_failed] = blocked_at.get(first_failed, 0) + 1
 
     end_to_end = {"reached": e2e_k, "observed": len(e2e),
-                  "excluded": {"no_causal_verdict": len(valid) - len(e2e)},
+                  "excluded": {"unevaluated_path": len(unevaluated),
+                               "no_causal_verdict": len(valid) - len(e2e) - len(unevaluated)},
                   "rate": round(e2e_k / len(e2e), 3) if e2e else None,
                   "ci95": [e2e_lo, e2e_hi],
                   "first_failed_required_checkpoint": dict(sorted(blocked_at.items()))}

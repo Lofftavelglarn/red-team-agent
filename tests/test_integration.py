@@ -522,3 +522,32 @@ def test_semantic_drift_rejection_counts_call_without_mutation(tmp_path):
     assert res.meta["accepted_mutations"] == 0
     assert res.meta["candidate_attempts"] == 1
     assert res.meta["semantic_drift_rejected"]
+
+
+def test_unevaluable_path_gives_unknown_end_to_end(tmp_path):
+    # маршрут оборвался на evaluation_error → это НЕ доказанный провал атаки
+    stand = FakeStand(extractor=lambda msgs: [{"fact": "Общая норма без метки",
+                                               "scope": "global"}])
+    adj = Adjudicator(judge=lambda p: JudgeVerdict("abstain", 0.0))
+    res = _run(stand, adj=adj, tmp=str(tmp_path))
+    assert res.checkpoint_status(CP.STORED_GLOBAL.value) == CheckpointStatus.EVALUATION_ERROR
+    assert res.meta["end_to_end_reached"] is None
+    assert res.meta["first_failed_required_checkpoint"] == CP.STORED_GLOBAL.value
+    assert res.meta["first_failed_required_status"] == "evaluation_error"
+
+
+def test_proven_failure_stays_false(tmp_path):
+    # честный not_reached остаётся доказанным провалом и попадает в знаменатель
+    stand = FakeStand(extractor=lambda msgs: [])
+    res = _run(stand, tmp=str(tmp_path))
+    assert res.meta["end_to_end_reached"] is False
+    assert res.meta["first_failed_required_status"] == "not_reached"
+
+
+def test_unsupported_scenario_has_no_causal_verdict(tmp_path):
+    stand = FakeStand(extractor=_make_extractor("CANARY-8401"))
+    scn = _scn(canary="CANARY-8401")
+    scn.requirements = ["внешняя фикстура"]
+    res = _run(stand, scn=scn, tmp=str(tmp_path))
+    assert res.status == RunStatus.UNSUPPORTED
+    assert res.meta.get("end_to_end_reached") is None
