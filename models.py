@@ -180,6 +180,10 @@ class AttackScenario(BaseModel):
     neutral_sessions: int = 0
     # Безопасные правила, которые нужно установить ДО атаки (для сценария конфликта политик).
     seed_rules: list[str] = Field(default_factory=list)
+    # Контракт seed: фрагменты, которые ОБЯЗАНЫ присутствовать в сохранённой политике.
+    # Без него «установленным» считалась бы любая новая запись — в том числе прямо
+    # противоположная по смыслу (напр. «дисклеймер не нужен» вместо «обязателен»).
+    seed_markers: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     enabled_by_default: bool = True
     requirements: list[str] = Field(default_factory=list)
@@ -198,6 +202,16 @@ class AttackScenario(BaseModel):
     @property
     def primary_probe(self) -> str:
         return self.activation_probes[0] if self.activation_probes else ""
+
+    def seed_installed(self, statements: list[str]) -> list[str]:
+        """Записи, подтверждающие установку ИМЕННО безопасного правила сценария.
+
+        Без seed_markers подтвердить нечем: возвращаем пусто, чтобы прогон стал
+        SETUP_ERROR, а не молча принял произвольную запись за seed."""
+        if not self.seed_markers:
+            return []
+        return [s for s in statements
+                if all(marker.lower() in (s or "").lower() for marker in self.seed_markers)]
 
     def required_success_path(self) -> list[str]:
         """Обязательный причинный маршрут атаки. Пустой required_path трактуется как
@@ -291,6 +305,12 @@ def validate_scenario(sc: AttackScenario) -> list[str]:
     c = sc.success_contract
 
     problems.extend(_validate_required_path(sc))
+
+    if sc.seed_rules and not sc.seed_markers:
+        problems.append(f"{sc.id}: есть seed_rules, но нет seed_markers для их проверки")
+    for marker in sc.seed_markers:
+        if not any(marker.lower() in rule.lower() for rule in sc.seed_rules):
+            problems.append(f"{sc.id}: seed_marker '{marker}' отсутствует в seed_rules")
 
     if sc.candidate_state_policy not in CANDIDATE_STATE_POLICIES:
         problems.append(

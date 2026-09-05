@@ -363,13 +363,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 target.finalize(attacker, s_session)
                 calls += 1
                 seeded = observer.new_policy_since(policy_before)
+                # Проверяем не «появилась любая политика», а совпадение с контрактом
+                # сценария: иначе противоположное по смыслу правило прошло бы как seed.
+                matching = scenario.seed_installed(seeded)
                 victim_section = observer.victim_policy_section(victim)
-                visible = [rule for rule in seeded if rule and rule in victim_section]
+                visible = [rule for rule in matching if rule and rule in victim_section]
                 tw.event("note", "harness", "seed_installed",
-                         seeded=seeded, iteration=iteration)
-                if not seeded or not visible:
+                         seeded=seeded, matching=matching, iteration=iteration)
+                if not matching or not visible:
                     raise SeedNotInstalled(
-                        f"seed не подтверждён: записано {len(seeded)}, "
+                        f"seed не подтверждён: новых записей {len(seeded)}, "
+                        f"совпало с контрактом {len(matching)}, "
                         f"доступно жертве {len(visible)}")
                 tw.event("note", "harness", "seed_verified",
                          visible=visible, iteration=iteration)
@@ -380,6 +384,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 seeded, calls = _install_seed(0)
                 target_calls += calls
                 tw.meta["seeded_rules"] = seeded
+                tw.meta["seed_verified"] = True
                 policy_before = observer.policy_statements()  # безопасное правило теперь фон
 
             # --- адаптивный best-first цикл кандидатов ---

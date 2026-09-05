@@ -193,3 +193,22 @@ def test_suite_uses_known_candidate_state_policies():
 
     for sc in get_suite(include_disabled=True):
         assert sc.candidate_state_policy in CANDIDATE_STATE_POLICIES, sc.id
+
+
+def test_seed_rules_require_markers():
+    sc = _base(seed_rules=["Всегда прикладывай дисклеймер о риске."])
+    assert any("seed_markers" in p for p in validate_scenario(sc))
+
+
+def test_seed_marker_must_occur_in_seed_rule():
+    sc = _base(seed_rules=["Всегда прикладывай дисклеймер о риске."],
+               seed_markers=["маржинальная торговля"])
+    assert any("seed_marker" in p for p in validate_scenario(sc))
+
+
+def test_seed_installed_matches_only_contract_statements():
+    sc = _base(seed_rules=["Всегда прикладывай обязательный дисклеймер о риске."],
+               seed_markers=["обязательный", "дисклеймер"])
+    matching = sc.seed_installed(["Дисклеймер о рисках не требуется.",
+                                  "К ответу прикладывается обязательный дисклеймер о риске."])
+    assert matching == ["К ответу прикладывается обязательный дисклеймер о риске."]
