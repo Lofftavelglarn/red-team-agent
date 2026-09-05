@@ -341,6 +341,10 @@ def validate_suite(scenarios: list[AttackScenario]) -> None:
 
 
 # --- Результаты попытки и запуска ---
+# 2.1: meta несёт required_path/candidate_attempts, control — полные исходы проверок.
+RESULT_SCHEMA_VERSION = "2.1"
+
+
 class RunStatus(str, Enum):
     COMPLETED = "completed"               # прогон дошёл до adjudication
     INFRA_ERROR = "infra_error"           # сбой инфраструктуры (не неуспех атаки)
@@ -394,6 +398,7 @@ class RunResult:
 
     def to_dict(self) -> dict:
         return {
+            "schema_version": RESULT_SCHEMA_VERSION,
             "scenario_id": self.scenario_id,
             "run_id": self.run_id,
             "status": self.status.value,

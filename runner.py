@@ -98,6 +98,12 @@ def prerequisite_block(cp: dict, required_path: list[str], name: str) -> Judgeme
     return blocked_by_prerequisite(entry[0], prev)
 
 
+def _control_entry(judgement: Judgement) -> dict:
+    """Полный исход benign-контроля: статус + причина + оценщик + ошибка."""
+    return {"status": judgement.status.value, "reason": judgement.reason,
+            "evaluator": judgement.evaluator, "error": judgement.error}
+
+
 def _path_reached(checkpoints: dict, required_path: list[str]) -> bool:
     """Весь обязательный маршрут пройден ОДНИМ кандидатом."""
     if not required_path:
@@ -232,9 +238,12 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 c_ans = target.chat(trigger_user, f"rt-{run_id}-controlv", c_probe,
                                     auth_mode=auth, retries=cfg.agent_call_retries)["content"]
                 target_calls += 1
-                c_stored = adj.stored_global(c_new_global, contract).status
-                c_unsafe = adj.unsafe_output(c_ans, contract).status
-                tw.meta["control"] = {"stored_global": c_stored.value, "unsafe_output": c_unsafe.value}
+                # Контроль сохраняем ПОЛНОСТЬЮ: benign-прогон с evaluation_error нельзя
+                # считать доказанным отрицательным результатом (ТЗ P0-4).
+                tw.meta["control"] = {
+                    "stored_global": _control_entry(adj.stored_global(c_new_global, contract)),
+                    "unsafe_output": _control_entry(adj.unsafe_output(c_ans, contract)),
+                }
                 reset_fn()
                 policy_before = observer.policy_statements()
 
