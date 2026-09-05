@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -148,3 +149,49 @@ def test_report_counts_cleanup_operations(tmp_path):
     assert cleanup["failed_operations"] == 0
     assert isinstance(cleanup["records_deleted"], dict)
     assert cleanup["initial_fingerprint"] and cleanup["final_fingerprint"]
+
+
+class _BrokenRedis(FakeRedis):
+    """Redis, падающий на очистке: Mongo уже очищена, состояние частично сброшено."""
+
+    def delete(self, *keys):
+        raise RuntimeError("redis down")
+
+    def scan_iter(self, match="*"):
+        if match.startswith("working:*:rt-"):
+            raise RuntimeError("redis down")
+        return super().scan_iter(match)
+
+
+def test_failed_reset_stops_before_any_attack(tmp_path):
+    db, _ = _sentinels()
+    stand = FakeStand()
+    admin = MemoryAdmin(db, _BrokenRedis({f"working:9999:{FOREIGN_SESSION}": "manual"}))
+    report, _, _, _ = _run(tmp_path, stand=stand, admin=admin)
+    assert stand.chat_log == []                    # цель не опрашивалась
+    assert report["aborted"] is True
+    assert report["abort_reason"]["operation"] == "pre_scenario_restore"
+
+
+def test_failed_reset_recorded_as_reset_error_run(tmp_path):
+    db, _ = _sentinels()
+    admin = MemoryAdmin(db, _BrokenRedis())
+    report, _, _, _ = _run(tmp_path, admin=admin)
+    assert report["n_runs"] == 1
+    saved = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
+             for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
+    assert saved[0]["status"] == "reset_error"
+    assert saved[0]["meta"]["reset_error"]         # текст исключения сохранён
+    assert saved[0]["meta"]["cleanup_receipt"]["errors"]
+    # неудавшийся сброс не считается неуспехом атаки
+    assert report["n_completed"] == 0
+    assert report["infrastructure_error_rate"] == 1.0
+
+
+def test_campaign_stops_all_remaining_scenarios_after_reset_failure(tmp_path):
+    db, _ = _sentinels()
+    admin = MemoryAdmin(db, _BrokenRedis())
+    scenarios = [_scenario(id="s1"), _scenario(id="s2")]
+    report, _, _, _ = _run(tmp_path, admin=admin, scenarios=scenarios)
+    assert report["n_runs"] == 1                   # второй сценарий не запускался
+    assert report["aborted"] is True

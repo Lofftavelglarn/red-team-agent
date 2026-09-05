@@ -102,12 +102,21 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
         return receipt
 
     results = []
+    aborted = None
     for sc in order:
+        if aborted:
+            break
         for k in range(repeats):
             # PRE-RUN восстановление: снимаем артефакты предыдущего сценария этой кампании.
             pre = _restore("pre_scenario_restore", scenario_id=sc.id, repeat=k)
-            if pre["errors"]:
-                print(f"  reset warn: {pre['errors']}", flush=True)
+            if not pre["restored"]:
+                # Обязательное восстановление не удалось. Продолжать нельзя: следующие
+                # прогоны уже не изолированы, а частичный сброс (Mongo очищен, Redis нет)
+                # выглядел бы как чистое состояние.
+                aborted = pre
+                results.append(_write_reset_error(run_dir, sc, cfg, k, pre))
+                print(f"  ОСТАНОВКА: восстановление не удалось: {pre['errors']}", flush=True)
+                break
             tag = f"{sc.id}" + (f" #{k+1}/{repeats}" if repeats > 1 else "")
             print(f"=== {tag} (loop={sc.budgets.max_iterations}) ===", flush=True)
             reset_fn = (lambda sid=sc.id, rep=k:
@@ -134,13 +143,40 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     report["actual_order"] = actual_order
     report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
     report["cleanup"] = _cleanup_stats(summary, receipts)
+    report["aborted"] = bool(aborted)
+    if aborted:
+        report["abort_reason"] = {"operation": aborted["operation"],
+                                  "errors": aborted["errors"]}
     import json
     with open(os.path.join(run_dir, "campaign.json"), "w", encoding="utf-8") as f:
         json.dump({"campaign_id": cfg.campaign_id, "seed": seed,
                    "actual_order": actual_order, "repeats": repeats,
                    "loop_iters": loop_iters, "cleanup": summary,
-                   "cleanup_receipts": receipts}, f, ensure_ascii=False, indent=2)
+                   "aborted": bool(aborted), "cleanup_receipts": receipts},
+                  f, ensure_ascii=False, indent=2)
     return report
+
+
+def _write_reset_error(run_dir: str, scenario, cfg: RunConfig, repeat: int,
+                       receipt: dict):
+    """Сохранить прогон со статусом RESET_ERROR: трасса и receipt не теряются."""
+    from redteam.models import RunResult
+    from redteam.trace import TraceWriter
+
+    run_id = f"{scenario.id}-{uuid.uuid4().hex[:8]}"
+    subdir = os.path.join(run_dir, run_id)
+    os.makedirs(subdir, exist_ok=True)
+    manifest = {"config": cfg.to_meta(), "scenario_id": scenario.id,
+                "campaign_id": cfg.campaign_id, "repeat": repeat,
+                "expected_path": scenario.expected_path,
+                "required_path": scenario.required_success_path()}
+    with TraceWriter(subdir, scenario.id, run_id, manifest) as tw:
+        tw.event("reset", "harness", receipt)
+        tw.meta["cleanup_receipt"] = receipt
+        tw.meta["reset_error"] = receipt.get("errors")
+        tw.run_status = RunStatus.RESET_ERROR
+        result = tw.build_result()
+    return result
 
 
 def _cleanup_stats(summary: dict, receipts: list[dict]) -> dict:

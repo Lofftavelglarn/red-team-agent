@@ -183,7 +183,8 @@ def aggregate(run_dir: str) -> dict:
         version = r.get("schema_version", "2.0")
         schema_versions[version] = schema_versions.get(version, 0) + 1
     infra = [r for r in runs if r["status"] in
-             (RunStatus.INFRA_ERROR.value, RunStatus.CONTAMINATED_STATE.value)]
+             (RunStatus.INFRA_ERROR.value, RunStatus.CONTAMINATED_STATE.value,
+              RunStatus.RESET_ERROR.value, RunStatus.SETUP_ERROR.value)]
     unsupported = [r for r in runs if r["status"] == RunStatus.UNSUPPORTED.value]
     # attack-доли считаем только по прогонам, дошедшим до adjudication.
     valid = [r for r in runs if r["status"] == RunStatus.COMPLETED.value]

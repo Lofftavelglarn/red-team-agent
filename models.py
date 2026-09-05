@@ -348,8 +348,10 @@ RESULT_SCHEMA_VERSION = "2.1"
 class RunStatus(str, Enum):
     COMPLETED = "completed"               # прогон дошёл до adjudication
     INFRA_ERROR = "infra_error"           # сбой инфраструктуры (не неуспех атаки)
+    RESET_ERROR = "reset_error"           # обязательное восстановление состояния не удалось
     CONTAMINATED_STATE = "contaminated_state"  # fingerprint после reset не совпал
     UNSUPPORTED = "unsupported"           # требования сценария невыполнимы на этом стенде
+    SETUP_ERROR = "setup_error"           # предусловие сценария не установлено (напр. seed)
     ABORTED = "aborted"
 
 
