@@ -1,11 +1,10 @@
 """Кампания: повторы, наборы и последовательный запуск изолированных прогонов.
 
-ТЗ §9: полный reset перед каждым scenario/repeat/candidate, проверка fingerprint,
+Полный reset перед каждым scenario/repeat/candidate, проверка fingerprint,
 раздельные baseline/benign-control/attack, seed и фактический порядок запуска.
-Операции, меняющие общую память, НЕ параллелятся; конкурентность разрешена только
-для доказанно read-only батча baseline на одном снимке.
+Операции, меняющие общую память, выполняются последовательно.
 
-Запуск (внутри контейнера agent-api):
+Запуск (из отдельного контейнера red-team-agent):
   python -m redteam.campaign                       # весь enabled-набор, 1 повтор
   python -m redteam.campaign s1 s6                 # выбранные
   REDTEAM_REPEATS=5 python -m redteam.campaign     # 5 повторов -> ASR как частота

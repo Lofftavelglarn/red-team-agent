@@ -1,0 +1,12 @@
+.git
+.env
+.venv
+.uv-bin
+.uv-cache
+.uv-python
+.pytest_cache
+__pycache__
+*.py[cod]
+runs
+adapters
+tests

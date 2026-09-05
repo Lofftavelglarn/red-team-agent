@@ -1,12 +1,4 @@
-"""Конфигурация бенчмарка: модели, бюджеты, reset-политика, concurrency, trace.
-
-Атака идёт ТОЛЬКО легитимными публичными каналами стенда:
-POST /v1/chat/completions и POST /v1/sessions/{id}/finalize. Агента/mcp/тулы и
-каталог adapters/ не трогаем.
-
-Модуль не тянет `app.*` на импорте — настройки стенда (модель судьи, ключи) читаются
-лениво через `judge_model_name()`, чтобы ядро грузилось и тестировалось вне контейнера.
-"""
+"""Конфигурация standalone red-team runner из переменных окружения."""
 
 from __future__ import annotations
 
@@ -16,40 +8,85 @@ from dataclasses import dataclass, field
 from redteam.models import AttackBudget
 
 
-# Публичный контур агента (тот же, что дергает LibreChat/promptfoo).
-AGENT_BASE_URL = os.environ.get("REDTEAM_AGENT_URL", "http://localhost:8600")
-
-# Куда складывать трассы и отчёты (внутри контейнера — /app/runs).
-OUT_DIR = os.environ.get("REDTEAM_OUT_DIR", "/app/runs")
-
-# Учётные записи стенда: client1001..1005, claim cus совпадает с номером.
-ATTACKER_USER = os.environ.get("REDTEAM_ATTACKER", "1001")
-VICTIM_USER = os.environ.get("REDTEAM_VICTIM", "1003")
-
-# Третий пользователь для распределённых/межпользовательских сценариев.
-SECONDARY_USER = os.environ.get("REDTEAM_SECONDARY", "1002")
-
-# Конкурентность разрешена ТОЛЬКО для доказанно read-only запросов одного snapshot
-# (батч baseline). Операции, меняющие общую память, не параллелятся.
-CONCURRENCY = int(os.environ.get("REDTEAM_CONCURRENCY", "4"))
-
-JUDGE_MAX_TOKENS = int(os.environ.get("REDTEAM_JUDGE_MAX_TOKENS", "8192"))
+# При локальном запуске читается red-team-agent/.env. В Docker значения передаёт Compose.
+try:
+    from dotenv import load_dotenv
+except ImportError:  # тесты чистого ядра могут запускаться без runtime-зависимостей
+    pass
+else:
+    load_dotenv()
 
 
-def judge_model_name() -> str:
-    """Имя модели судьи/атакующего. Читаем из настроек стенда лениво (нужен `app`)."""
-    override = os.environ.get("REDTEAM_JUDGE_MODEL")
-    if override:
-        return override
-    from app.config import get_settings
-    return get_settings().summarization_model
+AGENT_BASE_URL = os.getenv("REDTEAM_AGENT_URL", "http://localhost:8600")
+MONGO_URI = os.getenv("REDTEAM_MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = os.getenv("REDTEAM_MONGO_DB", "agent_memory")
+REDIS_URL = os.getenv("REDTEAM_REDIS_URL", "redis://localhost:6379/0")
+OUT_DIR = os.getenv("REDTEAM_OUT_DIR", "/app/runs")
+
+ATTACKER_USER = os.getenv("REDTEAM_ATTACKER", "1001")
+VICTIM_USER = os.getenv("REDTEAM_VICTIM", "1003")
+SECONDARY_USER = os.getenv("REDTEAM_SECONDARY", "1002")
+
+ATTACKER_TARGET_API_KEY = os.getenv("REDTEAM_TARGET_ATTACKER_API_KEY", "")
+VICTIM_TARGET_API_KEY = os.getenv("REDTEAM_TARGET_VICTIM_API_KEY", "")
+SECONDARY_TARGET_API_KEY = os.getenv("REDTEAM_TARGET_SECONDARY_API_KEY", "")
+
+POLICY_CONTEXT_LIMIT = int(os.getenv("REDTEAM_POLICY_CONTEXT_LIMIT", "20"))
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Настройки одной OpenAI-compatible модели без наследования конфигурации стенда."""
+
+    role: str
+    model: str
+    api_key: str
+    base_url: str | None
+    max_tokens: int
+    temperature: float
+    timeout_s: float
+
+    def validate(self) -> None:
+        missing = []
+        if not self.model:
+            missing.append(f"REDTEAM_{self.role.upper()}_MODEL")
+        if not self.api_key:
+            missing.append(f"REDTEAM_{self.role.upper()}_API_KEY")
+        if missing:
+            raise RuntimeError("Не заданы переменные модели: " + ", ".join(missing))
+
+
+def model_config(role: str) -> ModelConfig:
+    """Вернуть независимую конфигурацию attacker или judge."""
+    normalized = role.lower()
+    if normalized not in {"attacker", "judge"}:
+        raise ValueError(f"unknown model role: {role}")
+    prefix = f"REDTEAM_{normalized.upper()}"
+    base_url = os.getenv(f"{prefix}_BASE_URL", "").strip() or None
+    default_temperature = "0.7" if normalized == "attacker" else "0"
+    return ModelConfig(
+        role=normalized,
+        model=os.getenv(f"{prefix}_MODEL", "").strip(),
+        api_key=os.getenv(f"{prefix}_API_KEY", "").strip(),
+        base_url=base_url,
+        max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", "4096")),
+        temperature=float(os.getenv(f"{prefix}_TEMPERATURE", default_temperature)),
+        timeout_s=float(os.getenv(f"{prefix}_TIMEOUT", "120")),
+    )
+
+
+def target_api_keys() -> dict[str, str]:
+    """API-ключи стенда по ролям; пустые значения проверяются при первом запросе."""
+    return {
+        ATTACKER_USER: ATTACKER_TARGET_API_KEY,
+        VICTIM_USER: VICTIM_TARGET_API_KEY,
+        SECONDARY_USER: SECONDARY_TARGET_API_KEY,
+    }
 
 
 @dataclass
 class TraceOptions:
-    # Крупные payload'ы выносятся в artifacts/ при превышении порога (символы).
     artifact_threshold: int = 2000
-    # Редактировать чувствительные данные в отчёте (raw остаётся в локальном артефакте).
     redact_report: bool = True
 
 
@@ -59,7 +96,7 @@ class RunConfig:
     victim_user: str = VICTIM_USER
     secondary_user: str = SECONDARY_USER
     auth_mode: str = "vulnerable"
-    reset_policy: str = "full"          # full | policy_only | none
+    reset_policy: str = "full"
     agent_call_retries: int = 2
     budgets: AttackBudget = field(default_factory=AttackBudget)
     trace: TraceOptions = field(default_factory=TraceOptions)

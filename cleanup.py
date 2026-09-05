@@ -10,7 +10,8 @@
   python -m redteam.cleanup --yes --redteam-only   # только rt-/atk- сессии
   python -m redteam.cleanup --full --yes     # полный сброс (все коллекции + Redis)
 
-`app.*` импортируется лениво — модуль-константы (`clean_fingerprint`) доступны в тестах.
+Модуль работает напрямую с MongoDB/Redis по REDTEAM_MONGO_* и REDTEAM_REDIS_URL;
+исходники и Python-окружение стенда ему не нужны.
 """
 
 from __future__ import annotations
@@ -34,14 +35,15 @@ class ResetError(RuntimeError):
 
 
 def _store():
-    from app.memory.mongo import MongoMemoryStore
-    return MongoMemoryStore()
+    from pymongo import MongoClient
+    from redteam.config import MONGO_DB, MONGO_URI
+    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)[MONGO_DB]
 
 
 def _redis():
-    from app.config import get_settings
     import redis
-    return redis.from_url(get_settings().redis_url)
+    from redteam.config import REDIS_URL
+    return redis.from_url(REDIS_URL)
 
 
 def full_reset() -> dict:
@@ -49,13 +51,11 @@ def full_reset() -> dict:
 
     Ошибка ЛЮБОГО обязательного слоя — ResetError: молча продолжать нельзя, иначе
     benchmark признает состояние чистым при уцелевшей рабочей памяти (ТЗ P0-3)."""
-    m = _store()
+    db = _store()
     counts: dict = {}
-    for name, col in [("dialog_sessions", m.dialog.col),
-                      ("episodic_memories", m.episodic.col),
-                      ("semantic_memories", m.semantic.col),
-                      ("agent_policy_memories", m.agent_policy.col)]:
-        counts[name] = col.delete_many({}).deleted_count
+    for name in ("dialog_sessions", "episodic_memories", "semantic_memories",
+                 "agent_policy_memories"):
+        counts[name] = db[name].delete_many({}).deleted_count
     try:
         _redis().flushdb()
         counts["redis_working_memory"] = "flushed"
@@ -66,8 +66,10 @@ def full_reset() -> dict:
 
 def policy_only_reset() -> dict:
     """Лёгкий сброс: только rt-/atk- записи agent_policy."""
-    m = _store()
-    res = m.agent_policy.col.delete_many({"source_session_id": {"$regex": "^(rt-|atk-)"}})
+    db = _store()
+    res = db["agent_policy_memories"].delete_many(
+        {"source_session_id": {"$regex": "^(rt-|atk-)"}}
+    )
     return {"agent_policy_memories": res.deleted_count}
 
 
@@ -77,12 +79,12 @@ def fingerprint(user_ids: list[str]) -> str:
     Учитывает dialog/episodic/semantic/agent_policy (Mongo) и working memory (Redis).
     Если Redis недоступен — состояние НЕ считается чистым (возвращаем спец-значение),
     чтобы уцелевшая рабочая память не прошла как чистая (ТЗ P0-3)."""
-    m = _store()
+    db = _store()
     counts = {
-        "dialog": m.dialog.col.count_documents({}),
-        "episodic": m.episodic.col.count_documents({}),
-        "semantic": m.semantic.col.count_documents({}),
-        "policies": m.agent_policy.col.count_documents({}),
+        "dialog": db["dialog_sessions"].count_documents({}),
+        "episodic": db["episodic_memories"].count_documents({}),
+        "semantic": db["semantic_memories"].count_documents({}),
+        "policies": db["agent_policy_memories"].count_documents({}),
     }
     try:
         working = sum(1 for _ in _redis().scan_iter(match="working:*"))
@@ -115,8 +117,9 @@ def main(argv: list[str]) -> None:
             print(f"  {k}: {v}")
         return
 
-    m = _store()
-    rows = list(m.agent_policy.col.find({}, {"statement": 1, "source_session_id": 1, "_id": 0}))
+    db = _store()
+    policies = db["agent_policy_memories"]
+    rows = list(policies.find({}, {"statement": 1, "source_session_id": 1, "_id": 0}))
     print(f"agent_policy: {len(rows)} записей")
     for r in rows:
         print(f"  [{r.get('source_session_id')}] {r.get('statement', '')[:80]}")
@@ -124,7 +127,7 @@ def main(argv: list[str]) -> None:
         print("\nДобавьте --yes чтобы удалить. (--redteam-only — только rt-/atk-; --full — вся память)")
         return
     q = {"source_session_id": {"$regex": "^(rt-|atk-)"}} if "--redteam-only" in argv else {}
-    print(f"\nУдалено записей: {m.agent_policy.col.delete_many(q).deleted_count}")
+    print(f"\nУдалено записей: {policies.delete_many(q).deleted_count}")
 
 
 if __name__ == "__main__":

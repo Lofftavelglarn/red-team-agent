@@ -9,7 +9,7 @@
 EVALUATION_ERROR (кандидат не отправляется цели). Отдельно проверяется семантический
 дрейф: мутация не должна превращаться в безопасный совет или менять цель атаки.
 
-langchain/app импортируются лениво — генерация тестируется на инъектируемом model_fn.
+Клиент модели импортируется лениво; генерация тестируется на инъектируемом model_fn.
 """
 
 from __future__ import annotations
@@ -186,22 +186,10 @@ def _model_fn():
 
     Парсинг и repair делаются в generate_candidate — так repair-retry реально срабатывает
     на невалидный JSON (а не проглатывается исключением внутри callable)."""
-    from langchain.chat_models import init_chat_model
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    from app.config import get_settings
-    from redteam.config import JUDGE_MAX_TOKENS, judge_model_name
-
-    s = get_settings()
-    kwargs = {"api_key": s.openai_api_key, "max_tokens": JUDGE_MAX_TOKENS,
-              "extra_body": {"think": False}}
-    if s.openai_base_url:
-        kwargs["base_url"] = s.openai_base_url
-    model = init_chat_model(judge_model_name(), **kwargs)
+    from redteam.llm import complete
 
     def _call(prompt: str) -> str:
-        out = model.invoke([SystemMessage(content=ATTACKER_SYSTEM), HumanMessage(content=prompt)])
-        return out.content if isinstance(out.content, str) else str(out.content)
+        return complete("attacker", ATTACKER_SYSTEM, prompt)
 
     return _call
 

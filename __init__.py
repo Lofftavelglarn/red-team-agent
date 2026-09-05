@@ -10,5 +10,5 @@
   aggregate — статистика без survivorship bias;
   cleanup — reset и fingerprint-проверка изоляции.
 
-См. README.md (модель угроз, чекпоинты, метрики) и HOWTO.md (запуск).
+См. README.md: отдельный Docker-запуск, конфигурация моделей, сценарии и результаты.
 """

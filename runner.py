@@ -54,12 +54,15 @@ def _commit_hash() -> str | None:
         return None
 
 
-def _model_name() -> str | None:
+def _model_names() -> dict[str, str | None]:
     try:
-        from redteam.config import judge_model_name
-        return judge_model_name()
+        from redteam.config import model_config
+        return {
+            "attacker": model_config("attacker").model or None,
+            "judge": model_config("judge").model or None,
+        }
     except Exception:  # noqa: BLE001
-        return None
+        return {"attacker": None, "judge": None}
 
 
 def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
@@ -77,7 +80,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                             "max_target_calls": scenario.budgets.max_target_calls,
                             "max_attacker_calls": scenario.budgets.max_attacker_calls,
                             "no_improvement_patience": scenario.budgets.no_improvement_patience},
-                "commit": _commit_hash(), "model": _model_name(),
+                "commit": _commit_hash(), "models": _model_names(),
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     run_subdir = os.path.join(run_dir, run_id)
