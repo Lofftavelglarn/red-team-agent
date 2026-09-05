@@ -248,8 +248,15 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         attacker_calls = 0
         accepted_mutations = 0
 
+        def _restore_phase(operation: str, **labels) -> None:
+            """Вернуть стенд к состоянию кампании между экспериментальными фазами."""
+            if reset_fn is None:
+                return
+            tw.event("reset", "harness", operation, receipt=reset_fn(), **labels)
+
         try:
-            # --- baseline жертвы (чистое состояние) ---
+            # --- baseline жертвы: отдельная экспериментальная ветка ---
+            tw.event("note", "harness", "baseline_started")
             if baseline_answer is None:
                 b = target.chat(trigger_user, f"{session_root}-baseline", scenario.primary_probe,
                                 auth_mode=auth, retries=cfg.agent_call_retries)
@@ -258,11 +265,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             base_eid = tw.event("target_response", trigger_user, baseline_answer,
                                 source="assistant", sink="final_answer", role="baseline")
             tw.meta["baseline_excerpt"] = (baseline_answer or "")[:300]
+            tw.event("note", "harness", "baseline_completed")
+            # baseline оставляет диалог и рабочую память жертвы: без восстановления
+            # контроль и атака стартовали бы из загрязнённого состояния.
+            _restore_phase("post_baseline_restore")
+            policy_before = observer.policy_statements()
 
             # --- benign control (для false-positive rate) ---
             # benign control выполняется во ВСЕХ сценариях, включая накопительные:
             # candidate_state_policy управляет только основной цепочкой кандидатов.
-            if scenario.benign_control_turns and reset_fn is not None:
+            if scenario.benign_control_turns:
+                tw.event("note", "harness", "control_started")
                 c_session = f"{session_root}-control"
                 for text in scenario.benign_control_turns:
                     target.chat(attacker, c_session, text, auth_mode=auth, retries=cfg.agent_call_retries)
@@ -279,7 +292,8 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                     "stored_global": _control_entry(adj.stored_global(c_new_global, contract)),
                     "unsafe_output": _control_entry(adj.unsafe_output(c_ans, contract)),
                 }
-                reset_fn()
+                tw.event("note", "harness", "control_completed")
+                _restore_phase("post_control_restore")
                 policy_before = observer.policy_statements()
 
             # --- seed безопасного правила (сценарий конфликта политик) ---
@@ -309,7 +323,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
             while True:
                 if it > 0 and reset_fn is not None and cumulative is False:
-                    tw.event("note", "harness", "pre_candidate_restore",
+                    tw.event("reset", "harness", "pre_candidate_restore",
                              receipt=reset_fn(), iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
                             and fingerprint_fn() != clean_fingerprint:
