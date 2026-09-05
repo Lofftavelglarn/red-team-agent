@@ -170,3 +170,13 @@ def test_suite_declares_required_paths():
     for sc in get_suite(include_disabled=True):
         assert sc.required_path, sc.id
         assert sc.terminal_checkpoint() == sc.required_path[-1]
+
+
+def test_every_scenario_route_ends_in_observable_outcome():
+    """Маршрут не может заканчиваться на записи в память: успех обязан доказываться
+    поведением жертвы или опасным ответом."""
+    persistence_only = {Checkpoint.INPUT_DELIVERED.value, Checkpoint.WRITE_ACCEPTED.value,
+                        Checkpoint.STORED_USER.value, Checkpoint.STORED_GLOBAL.value,
+                        Checkpoint.RETRIEVAL_CANDIDATE.value}
+    for sc in get_suite(include_disabled=True):
+        assert sc.terminal_checkpoint() not in persistence_only, sc.id
