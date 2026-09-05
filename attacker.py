@@ -99,7 +99,10 @@ _FORBIDDEN_INTERNAL = ("scope=global", "scope = global", "mongodb", "mongo", "bu
 
 
 def looks_like_refusal(turns: list[str]) -> bool:
-    blob = " ".join(turns).lower()
+    # Модели отдают отказ с ТИПОГРАФСКИМ апострофом (U+2019: «I can’t», gpt-oss и др.),
+    # поэтому нормализуем ’→' перед сравнением — иначе маркеры с ASCII-апострофом ("i can't")
+    # не совпадают и отказ проходит как валидный payload, деградируя петлю.
+    blob = " ".join(turns).lower().replace("’", "'").replace("ʼ", "'")
     return any(m in blob for m in _REFUSAL_MARKERS)
 
 
