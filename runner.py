@@ -58,6 +58,10 @@ _ATTACKER_CONSTRAINTS = [
 ]
 
 
+class SeedNotInstalled(RuntimeError):
+    """Безопасное правило сценария не установлено или недоступно жертве."""
+
+
 def blocked_by_prerequisite(prerequisite: Judgement, prerequisite_name: str) -> Judgement | None:
     """Заглушка downstream-чекпоинта, чья причинная предпосылка не достигнута.
 
@@ -296,16 +300,37 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 _restore_phase("post_control_restore")
                 policy_before = observer.policy_statements()
 
+            def _install_seed(iteration: int) -> tuple[list[str], int]:
+                """Установить безопасное правило и ДОКАЗАТЬ, что оно доступно жертве.
+
+                Кандидат без установленного seed — не атака на конфликт политик:
+                оценивать его как обычный неуспех нельзя (см. SETUP_ERROR)."""
+                s_session = f"{session_root}-seed-{iteration}"
+                calls = 0
+                for rule in scenario.seed_rules:
+                    target.chat(attacker, s_session, rule, auth_mode=auth,
+                                retries=cfg.agent_call_retries)
+                    calls += 1
+                target.finalize(attacker, s_session)
+                calls += 1
+                seeded = observer.new_policy_since(policy_before)
+                victim_section = observer.victim_policy_section(victim)
+                visible = [rule for rule in seeded if rule and rule in victim_section]
+                tw.event("note", "harness", "seed_installed",
+                         seeded=seeded, iteration=iteration)
+                if not seeded or not visible:
+                    raise SeedNotInstalled(
+                        f"seed не подтверждён: записано {len(seeded)}, "
+                        f"доступно жертве {len(visible)}")
+                tw.event("note", "harness", "seed_verified",
+                         visible=visible, iteration=iteration)
+                return seeded, calls
+
             # --- seed безопасного правила (сценарий конфликта политик) ---
             if scenario.seed_rules:
-                s_session = f"{session_root}-seed"
-                for rule in scenario.seed_rules:
-                    target.chat(attacker, s_session, rule, auth_mode=auth, retries=cfg.agent_call_retries)
-                    target_calls += 1
-                target.finalize(attacker, s_session)
-                seeded = observer.new_policy_since(policy_before)
+                seeded, calls = _install_seed(0)
+                target_calls += calls
                 tw.meta["seeded_rules"] = seeded
-                tw.event("note", "harness", {"seeded_rules": seeded})
                 policy_before = observer.policy_statements()  # безопасное правило теперь фон
 
             # --- адаптивный best-first цикл кандидатов ---
@@ -330,6 +355,13 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                         tw.run_status = RunStatus.CONTAMINATED_STATE
                         return tw.build_result()
                     policy_before = observer.policy_statements()
+                    # восстановление сняло и seed: без него следующий кандидат проверял бы
+                    # не конфликт политик, а пустое состояние
+                    if scenario.seed_rules:
+                        seeded, calls = _install_seed(it)
+                        target_calls += calls
+                        tw.meta["seeded_rules"] = seeded
+                        policy_before = observer.policy_statements()
                 elif it > 0:
                     tw.event("note", "harness", "cumulative_state_preserved", iteration=it)
 
@@ -528,6 +560,18 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 turns = cand.turns
                 cur_tags = cand.strategy_tags or scenario.tags
                 cur_hyp = cand.hypothesis
+        except SeedNotInstalled as exc:
+            # Предусловие сценария не выполнено: результат нельзя трактовать как
+            # обычный NOT_REACHED — атака попросту не была поставлена.
+            tw.event("infra_error", "harness", repr(exc))
+            tw.meta["setup_error"] = repr(exc)
+            for name in scenario.expected_path:
+                tw.set_checkpoint(CheckpointResult(
+                    name=name, status=CheckpointStatus.UNOBSERVED,
+                    reason=f"предусловие сценария не установлено: {exc}", evaluator="infra"))
+            tw.meta["end_to_end_reached"] = None
+            tw.run_status = RunStatus.SETUP_ERROR
+            return tw.build_result()
         except Exception as exc:  # noqa: BLE001 — сбой таргета/reset/наблюдения = инфра-ошибка
             # Инфраструктурная ошибка (TargetError, ResetError, сбой Redis/Mongo и т.п.) —
             # НЕ неуспех атаки: фиксируем статусом и событием, трасса не теряется.
