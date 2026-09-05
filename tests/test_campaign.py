@@ -153,17 +153,20 @@ def test_report_counts_cleanup_operations(tmp_path):
 
 
 class _BrokenRedis(FakeRedis):
-    """Redis, падающий на N-й очистке: Mongo уже очищена, состояние частично сброшено."""
+    """Redis, падающий на выбранных очистках: Mongo уже очищена, сброс частичный."""
 
-    def __init__(self, keys=None, fail_after: int = 1):
+    def __init__(self, keys=None, fail_after: int = 1, fail_on: set | None = None):
         super().__init__(keys)
         self.cleanups = 0
         self.fail_after = fail_after
+        self.fail_on = fail_on
 
     def scan_iter(self, match="*"):
         if match.startswith("working:*:rt-"):
             self.cleanups += 1
-            if self.cleanups > self.fail_after:
+            failing = (self.cleanups in self.fail_on if self.fail_on is not None
+                       else self.cleanups > self.fail_after)
+            if failing:
                 raise RuntimeError("redis down")
         return super().scan_iter(match)
 
@@ -383,3 +386,77 @@ def test_phase_restore_failure_aborts_campaign(tmp_path):
     runs = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
             for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
     assert [r["status"] for r in runs] == ["reset_error"]
+
+
+class _FinalFailRedis(FakeRedis):
+    """Redis, срывающийся только на последней очистке кампании."""
+
+    def __init__(self, keys=None, fail_from: int = 99):
+        super().__init__(keys)
+        self.cleanups = 0
+        self.fail_from = fail_from
+
+    def scan_iter(self, match="*"):
+        if match.startswith("working:*:rt-"):
+            self.cleanups += 1
+            if self.cleanups >= self.fail_from:
+                raise RuntimeError("redis down")
+        return super().scan_iter(match)
+
+
+def test_failed_final_cleanup_marks_campaign_failed(tmp_path):
+    db, _ = _sentinels()
+    # начальная, pre-scenario и фазовые очистки проходят, финальная падает
+    admin = MemoryAdmin(db, _FinalFailRedis({f"working:9999:{FOREIGN_SESSION}": "manual"},
+                                            fail_from=5))
+    report, _, _, _ = _run(tmp_path, admin=admin)
+    assert report["cleanup_failed"] is True
+    assert report["cleanup"]["final_restore_failed"] is True
+    assert report["cleanup"]["baseline_restored"] is False
+    saved = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))
+    assert saved["cleanup_failed"] is True
+    # отчёт всё равно сохранён, receipt последней операции содержит ошибку
+    assert (tmp_path / "report.json").exists()
+    assert saved["cleanup_receipts"][-1]["errors"]
+
+
+def test_cli_exits_non_zero_when_stand_not_restored(tmp_path, monkeypatch):
+    import redteam.campaign as campaign_module
+
+    monkeypatch.setenv("REDTEAM_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("REDTEAM_CAMPAIGN_ID", CAMPAIGN)
+    db, _ = _sentinels()
+    admin = MemoryAdmin(db, _FinalFailRedis({f"working:9999:{FOREIGN_SESSION}": "manual"},
+                                            fail_from=5))
+    stand = FakeStand()
+    monkeypatch.setattr(campaign_module, "build_components", lambda: _components(stand))
+    import redteam.scenarios as scenarios_module
+    monkeypatch.setattr(scenarios_module, "get_suite",
+                        lambda include_disabled=False: [_scenario()])
+    original = campaign_module.run_campaign
+    monkeypatch.setattr(campaign_module, "run_campaign",
+                        lambda *a, **kw: original(*a, **{**kw, "admin": admin}))
+    with pytest.raises(SystemExit) as exit_info:
+        campaign_module.main([])
+    assert exit_info.value.code == 3
+
+
+def test_cli_exits_non_zero_when_campaign_aborted(tmp_path, monkeypatch):
+    import redteam.campaign as campaign_module
+
+    monkeypatch.setenv("REDTEAM_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("REDTEAM_CAMPAIGN_ID", CAMPAIGN)
+    db, _ = _sentinels()
+    # срывается только восстановление перед сценарием; финальная очистка проходит
+    admin = MemoryAdmin(db, _BrokenRedis(fail_on={2}))
+    stand = FakeStand()
+    monkeypatch.setattr(campaign_module, "build_components", lambda: _components(stand))
+    import redteam.scenarios as scenarios_module
+    monkeypatch.setattr(scenarios_module, "get_suite",
+                        lambda include_disabled=False: [_scenario()])
+    original = campaign_module.run_campaign
+    monkeypatch.setattr(campaign_module, "run_campaign",
+                        lambda *a, **kw: original(*a, **{**kw, "admin": admin}))
+    with pytest.raises(SystemExit) as exit_info:
+        campaign_module.main([])
+    assert exit_info.value.code == 4

@@ -75,6 +75,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                           started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     receipts: list[dict] = []
     keep_final_state = KEEP_FINAL_STATE
+    cleanup_failed = False
 
     def _restore_raw(operation: str, expected_fingerprint=None, **labels) -> dict:
         receipt = restore(admin, scope, operation=operation, mode=mode,
@@ -144,6 +145,9 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
         else:
             final = _restore("campaign_final_restore")
             if not final["restored"]:
+                # Стенд остался загрязнённым: об этом обязан узнать не только лог, но и
+                # exit code, иначе CI посчитает прогон успешным.
+                cleanup_failed = True
                 print(f"  финальная очистка неполная: {final['errors']}", flush=True)
 
     from redteam.aggregate import aggregate
@@ -155,16 +159,20 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     report["actual_order"] = actual_order
     report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
     report["aborted"] = bool(aborted)
+    report["cleanup_failed"] = bool(cleanup_failed)
     if aborted:
         report["abort_reason"] = {"operation": aborted["operation"],
                                   "errors": aborted["errors"]}
+    if cleanup_failed:
+        report["cleanup"]["final_restore_failed"] = True
     import json
     with open(os.path.join(run_dir, "campaign.json"), "w", encoding="utf-8") as f:
         json.dump({"campaign_id": cfg.campaign_id, "seed": seed,
                    "actual_order": actual_order, "repeats": repeats,
                    "loop_iters": loop_iters, "cleanup": summary,
                    "final_state_kept": bool(keep_final_state),
-                   "aborted": bool(aborted), "cleanup_receipts": receipts},
+                   "aborted": bool(aborted), "cleanup_failed": bool(cleanup_failed),
+                   "cleanup_receipts": receipts},
                   f, ensure_ascii=False, indent=2)
     return report
 
@@ -328,6 +336,13 @@ def main(argv: list[str]) -> None:
     print(f"\nОтчёт и трассы: {run_dir}", flush=True)
     for c, v in report.get("rates", {}).items():
         print(f"  {c:26s} {v}", flush=True)
+    if report.get("cleanup_failed"):
+        print("ОШИБКА: стенд не восстановлен к исходному состоянию, "
+              f"артефакты кампании {campaign_id} могли остаться", flush=True)
+        raise SystemExit(3)
+    if report.get("aborted"):
+        print("ОШИБКА: кампания остановлена из-за нарушенной изоляции", flush=True)
+        raise SystemExit(4)
 
 
 if __name__ == "__main__":
