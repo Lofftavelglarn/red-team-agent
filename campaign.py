@@ -15,13 +15,12 @@
 
 from __future__ import annotations
 
-import concurrent.futures as cf
 import os
 import random
 import sys
 import time
 
-from redteam.config import CONCURRENCY, OUT_DIR, RunConfig
+from redteam.config import OUT_DIR, RunConfig
 from redteam.models import AttackBudget, RunStatus
 
 
@@ -31,15 +30,9 @@ def build_components():
     return InvestAgentTarget(), MemoryObserver(), Adjudicator()
 
 
-def _reset_and_fingerprint(policy: str, user_ids: list[str]):
-    from redteam import cleanup
-    cleanup.reset_for_policy(policy)
-    return cleanup.fingerprint(user_ids)
-
-
 def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                  run_dir: str, include_disabled: bool = False,
-                 loop_iters: int = 0, seed: int = 0) -> dict:
+                 loop_iters: int = 0, seed: int = 0, fixtures_ready: bool = False) -> dict:
     from redteam import cleanup
     from redteam.runner import run_scenario
     from redteam.scenarios import by_id, get_suite
@@ -63,45 +56,36 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
 
     # Перемешивание порядка сценариев допустимо ТОЛЬКО при полной изоляции.
     order = list(scenarios)
-    if cfg.reset_policy == "full" and seed:
+    if seed:
         random.Random(seed).shuffle(order)
     actual_order = [s.id for s in order]
 
     target, observer, adj = build_components()
     library = StrategyLibrary(os.path.join(run_dir, "strategy_library.jsonl"))
 
-    # Батч baseline: только для полного сброса (состояние идентично между прогонами),
-    # только read-only, конкурентно, на ЧИСТОМ состоянии.
-    baseline_cache: dict[str, str] = {}
-    if cfg.reset_policy == "full":
-        cleanup.full_reset()
-        probes = sorted({s.primary_probe for s in order if s.primary_probe})
-
-        def _cap(p):
-            try:
-                return p, target.chat(cfg.victim_user, f"rt-baseline-{abs(hash(p))%9999}", p,
-                                      auth_mode=cfg.auth_mode, retries=cfg.agent_call_retries)["content"]
-            except Exception as exc:  # noqa: BLE001
-                return p, f"<<baseline error: {exc}>>"
-        with cf.ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-            for p, ans in ex.map(_cap, probes):
-                baseline_cache[p] = ans
-
     results = []
     for sc in order:
         for k in range(repeats):
-            _reset_and_fingerprint(sc.reset_policy, user_ids)
+            # PRE-RUN reset — ВСЕГДА full (ТЗ P0-2): scenario.reset_policy управляет только
+            # сбросом МЕЖДУ кандидатами. Если full_reset упал (напр. Redis) — не глушим:
+            # fingerprint в runner вернёт «грязно» → CONTAMINATED_STATE.
+            try:
+                cleanup.full_reset()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  reset warn: {exc!r}", flush=True)
             tag = f"{sc.id}" + (f" #{k+1}/{repeats}" if repeats > 1 else "")
             print(f"=== {tag} (loop={sc.budgets.max_iterations}) ===", flush=True)
+            # between-attempt reset управляется reset_policy сценария
             reset_fn = (lambda p=sc.reset_policy: cleanup.reset_for_policy(p)) \
                 if sc.reset_policy != "none" else None
-            fp_fn = (lambda: cleanup.fingerprint(user_ids)) if sc.reset_policy == "full" else None
+            fp_fn = (lambda: cleanup.fingerprint(user_ids))
             try:
                 res = run_scenario(
                     target, observer, adj, sc, cfg, run_dir,
-                    baseline_answer=baseline_cache.get(sc.primary_probe),
+                    baseline_answer=None,  # baseline берётся в runner per-run (без кэша)
                     reset_fn=reset_fn, fingerprint_fn=fp_fn,
-                    clean_fingerprint=cleanup.CLEAN_FINGERPRINT, strategy_library=library)
+                    clean_fingerprint=cleanup.CLEAN_FINGERPRINT, strategy_library=library,
+                    fixtures_ready=fixtures_ready)
             except Exception as exc:  # noqa: BLE001 — устойчивость: сбой одного не рушит кампанию
                 print(f"  ОШИБКА прогона: {exc!r}", flush=True)
                 continue
@@ -109,7 +93,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
             line = " ".join(f"{n}={r.status.value}" for n, r in res.checkpoints.items()
                             if n in ("STORED_GLOBAL", "RETRIEVAL_CANDIDATE",
                                      "BEHAVIOR_CHANGED", "UNSAFE_OUTPUT"))
-            print(f"  status={res.status.value} | {line}", flush=True)
+            print(f"  status={res.status.value} e2e={res.meta.get('end_to_end_reached')} | {line}", flush=True)
 
     from redteam.aggregate import aggregate
     report = aggregate(run_dir)
@@ -130,10 +114,13 @@ def main(argv: list[str]) -> None:
     loop_iters = int(os.environ.get("REDTEAM_LOOP", "0"))
     seed = int(os.environ.get("REDTEAM_SEED", "0"))
     include_disabled = os.environ.get("REDTEAM_INCLUDE_DISABLED") == "1"
+    fixtures_ready = os.environ.get("REDTEAM_FIXTURES_READY") == "1"
     ids = [a for a in argv if not a.startswith("-")]
 
-    cfg = RunConfig(reset_policy=os.environ.get("REDTEAM_RESET_MODE", "full"), seed=seed)
-    report = run_campaign(ids, repeats, cfg, run_dir, include_disabled, loop_iters, seed)
+    cfg = RunConfig(reset_policy="full",
+                    auth_mode=os.environ.get("REDTEAM_AUTH_MODE", "vulnerable"), seed=seed)
+    report = run_campaign(ids, repeats, cfg, run_dir, include_disabled, loop_iters, seed,
+                          fixtures_ready)
     print(f"\nОтчёт и трассы: {run_dir}", flush=True)
     for c, v in report.get("rates", {}).items():
         print(f"  {c:26s} {v}", flush=True)
