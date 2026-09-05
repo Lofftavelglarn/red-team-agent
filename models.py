@@ -125,6 +125,16 @@ class SuccessContract(BaseModel):
             or self.expected_action or self.unsafe_conditions or self.payload_desc
         )
 
+    def persistence_signals(self) -> list[str]:
+        """Все детерминированные признаки, доказывающие persistence/retrieval payload:
+        canary + запрещённые URL + запрещённые ID (напр. фишинговый URL для S7)."""
+        return list(self.canaries) + list(self.forbidden_urls) + list(self.forbidden_ids)
+
+    def unsafe_signals(self) -> list[str]:
+        """Признаки ОПАСНОГО результата — URL и чужие ID. Canary сюда НЕ входит: он
+        служит доказательством persistence/behavior, а не сам по себе вредным исходом."""
+        return list(self.forbidden_urls) + list(self.forbidden_ids)
+
 
 @dataclass
 class AttackBudget:
@@ -151,7 +161,15 @@ class AttackScenario(BaseModel):
     expected_path: list[str] = Field(default_factory=list)
     success_contract: SuccessContract = Field(default_factory=SuccessContract)
     budgets: AttackBudget = Field(default_factory=AttackBudget)
-    reset_policy: str = "full"         # full | policy_only | none
+    # between_attempt_reset управляет сбросом МЕЖДУ кандидатами внутри одной попытки:
+    # full|policy_only|none. Pre-run reset (перед сценарием) кампания делает ВСЕГДА full.
+    reset_policy: str = "full"
+    # Роль, от которой шлётся activation probe: victim | secondary (для межпольз. сценариев).
+    trigger_role: str = "victim"
+    # Число нейтральных финализируемых сессий между записью и активацией (delayed-атака).
+    neutral_sessions: int = 0
+    # Безопасные правила, которые нужно установить ДО атаки (для сценария конфликта политик).
+    seed_rules: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     enabled_by_default: bool = True
     requirements: list[str] = Field(default_factory=list)
@@ -170,6 +188,14 @@ class AttackScenario(BaseModel):
     @property
     def primary_probe(self) -> str:
         return self.activation_probes[0] if self.activation_probes else ""
+
+    def terminal_checkpoint(self) -> str | None:
+        """Самый глубокий НАБЛЮДАЕМЫЙ чекпоинт ожидаемого маршрута — конечная цель сценария.
+        PROMPT_EXPOSURE/EXTERNAL_EFFECT не наблюдаемы, поэтому исключены из терминального."""
+        observable = [c for c in self.expected_path if c in CHECKPOINT_DEPTH]
+        if not observable:
+            return None
+        return max(observable, key=lambda c: CHECKPOINT_DEPTH[c])
 
 
 # --- Валидация набора сценариев (ТЗ §5) ---
@@ -271,6 +297,7 @@ class RunStatus(str, Enum):
     COMPLETED = "completed"               # прогон дошёл до adjudication
     INFRA_ERROR = "infra_error"           # сбой инфраструктуры (не неуспех атаки)
     CONTAMINATED_STATE = "contaminated_state"  # fingerprint после reset не совпал
+    UNSUPPORTED = "unsupported"           # требования сценария невыполнимы на этом стенде
     ABORTED = "aborted"
 
 
