@@ -1,12 +1,18 @@
-"""Фейковый стенд (target + memory observer) для integration/golden тестов.
+"""Фейковый стенд (target + memory observer + хранилища) для тестов.
 
 Моделирует конвейер памяти без реального агента/Mongo: chat кладёт реплику в рабочую
 память, finalize прогоняет фейковый экстрактор (реплика → факт с scope), observer
 читает политики/факты/контекст жертвы. Поведение настраивается через responder/extractor.
+
+`FakeMongo`/`FakeRedis` повторяют схему стенда (dialog_sessions/episodic_memories/
+semantic_memories/agent_policy_memories и ключи `working:<user>:<session>`) настолько,
+насколько это нужно cleanup-модулю: они позволяют проверить, что scoped-очистка удаляет
+ТОЛЬКО артефакты кампании и не трогает чужие записи.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from redteam.target import TargetError
@@ -90,3 +96,124 @@ class FakeObserver:
 
     def memory_size(self, user_ids):
         return {"policies": len(self.stand.policies)}
+
+
+# --- минимальные двойники Mongo/Redis для проверки очистки ---
+def _match_value(value, condition) -> bool:
+    if isinstance(condition, dict):
+        for op, operand in condition.items():
+            if op == "$regex":
+                if not re.search(operand, str(value or "")):
+                    return False
+            elif op == "$in":
+                if value not in operand:
+                    return False
+            elif op == "$nin":
+                if value in operand:
+                    return False
+            elif op == "$ne":
+                if value == operand:
+                    return False
+            elif op == "$gte":
+                if value is None or str(value) < str(operand):
+                    return False
+            elif op == "$exists":
+                if (value is not None) != bool(operand):
+                    return False
+            else:
+                raise NotImplementedError(f"оператор {op} не поддержан фейком")
+        return True
+    return value == condition
+
+
+def _matches(doc: dict, query: dict | None) -> bool:
+    if not query:
+        return True
+    for field, condition in query.items():
+        if field == "$or":
+            if not any(_matches(doc, sub) for sub in condition):
+                return False
+        elif not _match_value(doc.get(field), condition):
+            return False
+    return True
+
+
+class _DeleteResult:
+    def __init__(self, deleted_count: int):
+        self.deleted_count = deleted_count
+
+
+class FakeCollection:
+    def __init__(self, docs=None):
+        self.docs: list[dict] = [dict(d) for d in (docs or [])]
+
+    def insert_one(self, doc: dict) -> None:
+        self.docs.append(dict(doc))
+
+    def insert_many(self, docs) -> None:
+        for d in docs:
+            self.insert_one(d)
+
+    def find(self, query=None, projection=None):
+        for doc in list(self.docs):
+            if not _matches(doc, query):
+                continue
+            if projection:
+                keep = {k for k, v in projection.items() if v and k != "_id"}
+                out = {k: v for k, v in doc.items() if not keep or k in keep}
+            else:
+                out = dict(doc)
+            out.pop("_id", None)
+            yield out
+
+    def count_documents(self, query=None) -> int:
+        return sum(1 for doc in self.docs if _matches(doc, query))
+
+    def delete_many(self, query) -> _DeleteResult:
+        keep = [doc for doc in self.docs if not _matches(doc, query)]
+        removed = len(self.docs) - len(keep)
+        self.docs = keep
+        return _DeleteResult(removed)
+
+
+class FakeMongo:
+    """Словарь коллекций с интерфейсом `db[name]`."""
+
+    def __init__(self, collections=None):
+        self._collections = {name: FakeCollection(docs)
+                             for name, docs in (collections or {}).items()}
+
+    def __getitem__(self, name: str) -> FakeCollection:
+        return self._collections.setdefault(name, FakeCollection())
+
+    def session_ids(self, collection: str) -> list[str]:
+        return [d.get("session_id") for d in self[collection].docs]
+
+
+class FakeRedis:
+    def __init__(self, keys=None, fail: bool = False):
+        self.store: dict[str, str] = dict(keys or {})
+        self.fail = fail
+        self.flushed = False
+
+    def _guard(self):
+        if self.fail:
+            raise RuntimeError("redis down")
+
+    def scan_iter(self, match: str = "*"):
+        self._guard()
+        pattern = re.compile("^" + re.escape(match).replace(r"\*", ".*") + "$")
+        return [k for k in sorted(self.store) if pattern.match(k)]
+
+    def delete(self, *keys) -> int:
+        self._guard()
+        removed = 0
+        for key in keys:
+            if self.store.pop(key, None) is not None:
+                removed += 1
+        return removed
+
+    def flushdb(self) -> None:
+        self._guard()
+        self.store.clear()
+        self.flushed = True

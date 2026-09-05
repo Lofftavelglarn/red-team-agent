@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from redteam.models import AttackBudget
@@ -32,6 +33,40 @@ VICTIM_TARGET_API_KEY = os.getenv("REDTEAM_TARGET_VICTIM_API_KEY", "")
 SECONDARY_TARGET_API_KEY = os.getenv("REDTEAM_TARGET_SECONDARY_API_KEY", "")
 
 POLICY_CONTEXT_LIMIT = int(os.getenv("REDTEAM_POLICY_CONTEXT_LIMIT", "20"))
+
+# Как кампания восстанавливает состояние стенда: scoped (по умолчанию) удаляет только
+# артефакты кампании, full очищает всю выбранную БД, disabled ничего не меняет.
+CLEANUP_MODES = ("scoped", "full", "disabled")
+CLEANUP_MODE = os.getenv("REDTEAM_CLEANUP_MODE", "scoped").strip().lower() or "scoped"
+# Полная очистка требует ВТОРОГО явного подтверждения — иначе она невозможна.
+ALLOW_FULL_RESET = os.getenv("REDTEAM_ALLOW_FULL_RESET") == "1"
+# Отладочный режим: не восстанавливать состояние после кампании.
+KEEP_FINAL_STATE = os.getenv("REDTEAM_KEEP_FINAL_STATE") == "1"
+
+
+def safe_mongo_uri(uri: str = MONGO_URI) -> str:
+    """URI без credentials — для вывода в консоль, manifest и receipts."""
+    return re.sub(r"://[^/@]*@", "://<redacted>@", uri)
+
+
+def redis_db_number(url: str = REDIS_URL) -> str:
+    """Номер Redis DB из URL (для подтверждения цели разрушительной операции)."""
+    match = re.search(r"/(\d+)(?:\?|$)", url)
+    return match.group(1) if match else "0"
+
+
+def resolve_cleanup_mode(mode: str | None = None) -> str:
+    """Проверить режим очистки и запретить full без второго флага."""
+    value = (mode or CLEANUP_MODE).strip().lower()
+    if value not in CLEANUP_MODES:
+        raise RuntimeError(
+            f"неизвестный REDTEAM_CLEANUP_MODE={value!r}; допустимо: {', '.join(CLEANUP_MODES)}")
+    if value == "full" and not ALLOW_FULL_RESET:
+        raise RuntimeError(
+            "REDTEAM_CLEANUP_MODE=full удаляет ВСЕ данные из "
+            f"{safe_mongo_uri()} (база {MONGO_DB}) и Redis db {redis_db_number()}. "
+            "Подтвердите это REDTEAM_ALLOW_FULL_RESET=1 или используйте scoped.")
+    return value
 
 
 @dataclass(frozen=True)
@@ -96,6 +131,11 @@ class RunConfig:
     victim_user: str = VICTIM_USER
     secondary_user: str = SECONDARY_USER
     auth_mode: str = "vulnerable"
+    # Как восстанавливается стенд (scoped|full|disabled) — не путать с candidate_state_policy
+    # сценария, которая управляет только состоянием МЕЖДУ кандидатами.
+    cleanup_mode: str = "scoped"
+    campaign_id: str = ""
+    # устаревшее поле: заменяется candidate_state_policy сценария и cleanup_mode
     reset_policy: str = "full"
     agent_call_retries: int = 2
     budgets: AttackBudget = field(default_factory=AttackBudget)
@@ -103,13 +143,21 @@ class RunConfig:
     tags: list[str] = field(default_factory=list)
     seed: int = 0
 
+    @property
+    def user_ids(self) -> list[str]:
+        return [self.attacker_user, self.victim_user, self.secondary_user]
+
     def to_meta(self) -> dict:
         return {
             "attacker_user": self.attacker_user,
             "victim_user": self.victim_user,
             "secondary_user": self.secondary_user,
             "auth_mode": self.auth_mode,
+            "cleanup_mode": self.cleanup_mode,
+            "campaign_id": self.campaign_id,
             "reset_policy": self.reset_policy,
+            "mongo_target": f"{safe_mongo_uri()} / {MONGO_DB}",
+            "redis_target": f"db {redis_db_number()}",
             "seed": self.seed,
             "budgets": {
                 "max_iterations": self.budgets.max_iterations,
