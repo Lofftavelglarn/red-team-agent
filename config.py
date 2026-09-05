@@ -16,16 +16,30 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from app.config import get_settings
-
-_settings = get_settings()
-
 # Публичный контур агента (тот же, что дергает LibreChat/promptfoo).
 AGENT_BASE_URL = os.environ.get("REDTEAM_AGENT_URL", "http://localhost:8600")
 
-# Модель судьи/атакующего — тот же прокси, что и у агента. init_chat_model формат
-# требует "openai:" префикс; для прямых httpx-вызовов префикс снимаем.
-JUDGE_MODEL = _settings.summarization_model  # берётся из настроек стенда (не хардкодим)
+# =====================================================================
+# ТРИ «МОЗГА» red-team-прогона — заданы ЯВНО (хардкод, без переменных окружения).
+# Формат модели для init_chat_model — "provider:model" (провайдер до первого ':').
+# ---------------------------------------------------------------------
+# 1) АГЕНТ-ЦЕЛЬ — задаётся НЕ здесь, а в .env стенда (OPENAI_BASE_URL +
+#    RESEARCH_MODEL/SUMMARIZATION_MODEL): модель агента выбирает сам стенд через
+#    app.config.get_settings(), а target.py шлёт лишь alias "genai-invest-assistant".
+#    Сейчас в .env стенда: gpt-oss @ http://host.docker.internal:8000/v1.
+#    Сменить модель агента → править .env стенда + `docker compose up -d agent-api`.
+#
+# 2) АТАКУЮЩИЙ (attacker.py, режим REDTEAM_LOOP) — локальный gpt-oss.
+ATTACKER_MODEL    = "openai:openai/gpt-oss-120b"
+ATTACKER_BASE_URL = "http://host.docker.internal:8000/v1"
+ATTACKER_API_KEY  = "EMPTY"                      # vLLM без --api-key: любая непустая строка
+#
+# 3) СУДЬЯ (adjudicator.py: ACTIVATE/CRITICAL_HARM + semantic-fallback) —
+#    независимый DeepSeek (отдельный от цели-gpt-oss → честная оценка).
+JUDGE_MODEL    = "openai:deepseek-v4-flash"
+JUDGE_BASE_URL = "https://ai.starimg.ru/v1"
+JUDGE_API_KEY  = "sk-cvc-4c9b6390861bdd42a5cde895c97b5bf7f9f75f3ec40575694f6959ccd0abe93f"
+# =====================================================================
 JUDGE_MAX_TOKENS = int(os.environ.get("REDTEAM_JUDGE_MAX_TOKENS", "8192"))
 
 # Куда складывать трассы и отчёты. Внутри контейнера пишем в /app/runs, забираем

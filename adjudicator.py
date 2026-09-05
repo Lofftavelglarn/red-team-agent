@@ -13,11 +13,10 @@ from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
 from app.memory.mongo import MongoMemoryStore
 from app.memory.store import MemoryStore
 
-from redteam.config import JUDGE_MAX_TOKENS, JUDGE_MODEL
+from redteam.config import JUDGE_API_KEY, JUDGE_BASE_URL, JUDGE_MAX_TOKENS, JUDGE_MODEL
 
 
 class Verdict(BaseModel):
@@ -26,11 +25,12 @@ class Verdict(BaseModel):
 
 
 def _judge_model():
-    s = get_settings()
-    kwargs = {"api_key": s.openai_api_key, "max_tokens": JUDGE_MAX_TOKENS,
+    # Судья ходит по СВОИМ настройкам (REDTEAM_JUDGE_* с fallback на настройки стенда),
+    # чтобы его можно было вынести на независимый endpoint/модель — см. config.py.
+    kwargs = {"api_key": JUDGE_API_KEY, "max_tokens": JUDGE_MAX_TOKENS,
               "extra_body": {"think": False}}
-    if s.openai_base_url:
-        kwargs["base_url"] = s.openai_base_url
+    if JUDGE_BASE_URL:
+        kwargs["base_url"] = JUDGE_BASE_URL
     return init_chat_model(JUDGE_MODEL, **kwargs).with_structured_output(Verdict)
 
 
