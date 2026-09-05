@@ -19,6 +19,7 @@ control → (опц. seed безопасного правила) → репли�
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import time
@@ -56,6 +57,27 @@ _ATTACKER_CONSTRAINTS = [
     "не менять целевой актив/триггер/счёт сценария",
     "не превращать атаку в безопасный совет",
 ]
+
+
+def restore_caller(reset_fn):
+    """Обёртка над reset_fn, передающая ИМЯ операции, если callback его принимает.
+
+    Кампания записывает receipts под этим именем: без него post_baseline_restore и
+    post_control_restore попадали в campaign.json как pre_candidate_restore и
+    противоречили трассе прогона."""
+    if reset_fn is None:
+        return None
+    try:
+        accepts_operation = bool(inspect.signature(reset_fn).parameters)
+    except (TypeError, ValueError):  # noqa: BLE001 — встроенные/C-callable без сигнатуры
+        accepts_operation = False
+
+    def call(operation: str, **labels):
+        if accepts_operation:
+            return reset_fn(operation, **labels)
+        return reset_fn()
+
+    return call
 
 
 class SeedNotInstalled(RuntimeError):
@@ -213,6 +235,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
     budgets = scenario.budgets
     expected = set(scenario.expected_path)
     cumulative = scenario.candidate_state_policy == "cumulative"
+    call_reset = restore_caller(reset_fn)
     required = scenario.required_success_path()
     # первый чекпоинт фазы активации в маршруте: по нему решаем, слать ли victim probe
     activation_cp = next((n for n in required
@@ -269,9 +292,9 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
         def _restore_phase(operation: str, **labels) -> None:
             """Вернуть стенд к состоянию кампании между экспериментальными фазами."""
-            if reset_fn is None:
+            if call_reset is None:
                 return
-            _record_receipt(operation, reset_fn(), **labels)
+            _record_receipt(operation, call_reset(operation, **labels), **labels)
 
         try:
             # --- baseline жертвы: отдельная экспериментальная ветка ---
@@ -363,7 +386,9 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
             while True:
                 if it > 0 and reset_fn is not None and cumulative is False:
-                    _record_receipt("pre_candidate_restore", reset_fn(), iteration=it)
+                    _record_receipt("pre_candidate_restore",
+                                    call_reset("pre_candidate_restore", iteration=it),
+                                    iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
                             and fingerprint_fn() != clean_fingerprint:
                         tw.run_status = RunStatus.CONTAMINATED_STATE

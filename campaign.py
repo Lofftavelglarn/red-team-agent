@@ -201,8 +201,8 @@ def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
                 break
             tag = f"{sc.id}" + (f" #{k+1}/{repeats}" if repeats > 1 else "")
             print(f"=== {tag} (loop={sc.budgets.max_iterations}) ===", flush=True)
-            reset_fn = (lambda sid=sc.id, rep=k:
-                        restore_fn("pre_candidate_restore", scenario_id=sid, repeat=rep))
+            reset_fn = (lambda operation, sid=sc.id, rep=k, **labels:
+                        restore_fn(operation, scenario_id=sid, repeat=rep, **labels))
             fp_fn = admin.fingerprint
             try:
                 res = run_scenario(

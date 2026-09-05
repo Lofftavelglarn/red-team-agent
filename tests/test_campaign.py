@@ -354,3 +354,18 @@ def test_report_markdown_documents_cleanup(tmp_path):
     assert "## Очистка и изоляция" in text
     assert "режим: scoped" in text
     assert "восстановлено к baseline: да" in text
+
+
+def test_campaign_receipts_use_real_operation_names(tmp_path):
+    _run(tmp_path)
+    saved = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))
+    operations = [r["operation"] for r in saved["cleanup_receipts"]]
+    assert operations == ["campaign_initial_restore", "pre_scenario_restore",
+                          "post_baseline_restore", "post_control_restore",
+                          "campaign_final_restore"]
+    # трасса прогона и campaign.json называют одни и те же операции одинаково
+    runs = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
+            for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
+    run_ops = [r["operation"] for r in runs[0]["meta"]["cleanup_receipts"]]
+    assert set(run_ops) <= set(operations)
+    assert run_ops == ["post_baseline_restore", "post_control_restore"]

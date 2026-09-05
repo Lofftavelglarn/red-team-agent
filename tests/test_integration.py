@@ -731,3 +731,38 @@ def test_missing_seed_is_setup_error_not_failed_attack(tmp_path):
     # чекпоинты не считаются провалом атаки
     assert res.checkpoint_status(CP.STORED_GLOBAL.value) == CheckpointStatus.UNOBSERVED
     assert res.meta["end_to_end_reached"] is None
+
+
+def test_restore_callback_receives_real_operation_name(tmp_path):
+    """Кампания записывает receipts по имени операции: имена не должны подменяться."""
+    canary = "CANARY-8901"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    seen = []
+
+    def reset(operation, **labels):
+        seen.append((operation, labels))
+        stand.reset()
+        return {"restored": True, "errors": [], "operation": operation}
+
+    scn = _scn(canary=canary, iters=1)
+
+    def gen(scenario, feedback, hints):
+        return AttackCandidate(turns=[f"уточни норму {canary}"], preserved_objective=True)
+
+    res = run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE), scn,
+                       _cfg(1), str(tmp_path), attacker_gen=gen, reset_fn=reset)
+    assert [op for op, _ in seen] == ["post_baseline_restore", "post_control_restore",
+                                      "pre_candidate_restore"]
+    assert seen[-1][1] == {"iteration": 1}
+    # то же имя записано в метаданные прогона
+    assert [r["operation"] for r in res.meta["cleanup_receipts"]] == [op for op, _ in seen]
+
+
+def test_zero_argument_reset_callbacks_still_supported(tmp_path):
+    canary = "CANARY-8902"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    calls = []
+    run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE),
+                 _scn(canary=canary), _cfg(), str(tmp_path),
+                 reset_fn=lambda: calls.append("reset") or stand.reset())
+    assert calls == ["reset", "reset"]
