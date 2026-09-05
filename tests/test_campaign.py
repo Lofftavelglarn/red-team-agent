@@ -369,3 +369,17 @@ def test_campaign_receipts_use_real_operation_names(tmp_path):
     run_ops = [r["operation"] for r in runs[0]["meta"]["cleanup_receipts"]]
     assert set(run_ops) <= set(operations)
     assert run_ops == ["post_baseline_restore", "post_control_restore"]
+
+
+def test_phase_restore_failure_aborts_campaign(tmp_path):
+    """Сбой восстановления внутри прогона останавливает и оставшиеся сценарии."""
+    db, _ = _sentinels()
+    # начальная очистка и pre_scenario проходят, восстановление после baseline падает
+    admin = MemoryAdmin(db, _BrokenRedis(fail_after=2))
+    scenarios = [_scenario(id="s1"), _scenario(id="s2")]
+    report, _, _, _ = _run(tmp_path, admin=admin, scenarios=scenarios)
+    assert report["aborted"] is True
+    assert report["abort_reason"]["operation"] == "phase_restore"
+    runs = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
+            for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
+    assert [r["status"] for r in runs] == ["reset_error"]

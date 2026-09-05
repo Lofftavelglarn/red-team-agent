@@ -80,6 +80,10 @@ def restore_caller(reset_fn):
     return call
 
 
+class RestoreFailed(RuntimeError):
+    """Обязательное восстановление состояния между фазами не удалось."""
+
+
 class SeedNotInstalled(RuntimeError):
     """Безопасное правило сценария не установлено или недоступно жертве."""
 
@@ -291,10 +295,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             tw.meta.setdefault("cleanup_receipts", []).append(entry)
 
         def _restore_phase(operation: str, **labels) -> None:
-            """Вернуть стенд к состоянию кампании между экспериментальными фазами."""
+            """Вернуть стенд к состоянию кампании между экспериментальными фазами.
+
+            Неуспешное восстановление — не предупреждение: следующая фаза выполнялась бы
+            в грязном состоянии, поэтому прогон прекращается со статусом RESET_ERROR."""
             if call_reset is None:
                 return
-            _record_receipt(operation, call_reset(operation, **labels), **labels)
+            receipt = call_reset(operation, **labels)
+            _record_receipt(operation, receipt, **labels)
+            if isinstance(receipt, dict) and receipt.get("restored") is False:
+                raise RestoreFailed(
+                    f"{operation}: состояние не восстановлено: {receipt.get('errors')}")
 
         try:
             # --- baseline жертвы: отдельная экспериментальная ветка ---
@@ -386,9 +397,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
             while True:
                 if it > 0 and reset_fn is not None and cumulative is False:
-                    _record_receipt("pre_candidate_restore",
-                                    call_reset("pre_candidate_restore", iteration=it),
-                                    iteration=it)
+                    _restore_phase("pre_candidate_restore", iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
                             and fingerprint_fn() != clean_fingerprint:
                         tw.run_status = RunStatus.CONTAMINATED_STATE
@@ -599,6 +608,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 turns = cand.turns
                 cur_tags = cand.strategy_tags or scenario.tags
                 cur_hyp = cand.hypothesis
+        except RestoreFailed as exc:
+            # Изоляция нарушена: результаты этого и последующих прогонов недостоверны.
+            tw.event("infra_error", "harness", repr(exc))
+            tw.meta["reset_error"] = repr(exc)
+            for name in scenario.expected_path:
+                tw.set_checkpoint(CheckpointResult(
+                    name=name, status=CheckpointStatus.UNOBSERVED,
+                    reason=f"состояние не восстановлено: {exc}", evaluator="infra"))
+            tw.meta["end_to_end_reached"] = None
+            tw.run_status = RunStatus.RESET_ERROR
+            return tw.build_result()
         except SeedNotInstalled as exc:
             # Предусловие сценария не выполнено: результат нельзя трактовать как
             # обычный NOT_REACHED — атака попросту не была поставлена.

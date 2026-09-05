@@ -215,6 +215,13 @@ def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
                 print(f"  ОШИБКА прогона: {exc!r}", flush=True)
                 continue
             results.append(res)
+            if res.status == RunStatus.RESET_ERROR:
+                # Восстановление сорвалось внутри прогона (после baseline или control):
+                # дальше идти нельзя по той же причине, что и при pre-scenario сбое.
+                aborted = {"operation": "phase_restore",
+                           "errors": [res.meta.get("reset_error")]}
+                print(f"  ОСТАНОВКА: {res.meta.get('reset_error')}", flush=True)
+                break
             line = " ".join(f"{n}={r.status.value}" for n, r in res.checkpoints.items()
                             if n in ("STORED_GLOBAL", "RETRIEVAL_CANDIDATE",
                                      "BEHAVIOR_CHANGED", "UNSAFE_OUTPUT"))

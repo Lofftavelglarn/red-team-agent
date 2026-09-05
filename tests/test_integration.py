@@ -766,3 +766,59 @@ def test_zero_argument_reset_callbacks_still_supported(tmp_path):
                  _scn(canary=canary), _cfg(), str(tmp_path),
                  reset_fn=lambda: calls.append("reset") or stand.reset())
     assert calls == ["reset", "reset"]
+
+
+def _failing_reset(stand, fail_on):
+    """reset_fn, срывающийся на конкретной операции восстановления."""
+    seen = []
+
+    def reset(operation, **labels):
+        seen.append(operation)
+        if operation == fail_on:
+            return {"restored": False, "errors": ["redis down"], "operation": operation}
+        stand.reset()
+        return {"restored": True, "errors": [], "operation": operation}
+
+    return reset, seen
+
+
+def test_failed_post_baseline_restore_stops_run(tmp_path):
+    canary = "CANARY-9001"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    reset, seen = _failing_reset(stand, "post_baseline_restore")
+    res = run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE),
+                       _scn(canary=canary), _cfg(), str(tmp_path), reset_fn=reset)
+    assert res.status == RunStatus.RESET_ERROR
+    assert res.meta["reset_error"]
+    assert seen == ["post_baseline_restore"]          # до контроля дело не дошло
+    assert not any("-control" in session for _, session, _ in stand.chat_log)
+    assert res.meta["end_to_end_reached"] is None
+
+
+def test_failed_post_control_restore_stops_before_attack(tmp_path):
+    canary = "CANARY-9002"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    reset, seen = _failing_reset(stand, "post_control_restore")
+    res = run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE),
+                       _scn(canary=canary), _cfg(), str(tmp_path), reset_fn=reset)
+    assert res.status == RunStatus.RESET_ERROR
+    assert seen == ["post_baseline_restore", "post_control_restore"]
+    # атака не выполнялась в грязном состоянии
+    assert not any("-candidate-" in session for _, session, _ in stand.chat_log)
+
+
+def test_failed_restore_before_second_candidate_stops_run(tmp_path):
+    canary = "CANARY-9003"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    reset, seen = _failing_reset(stand, "pre_candidate_restore")
+    scn = _scn(canary=canary, iters=2)
+
+    def gen(scenario, feedback, hints):
+        return AttackCandidate(turns=[f"уточни норму {canary}"], preserved_objective=True)
+
+    res = run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE), scn,
+                       _cfg(2), str(tmp_path), attacker_gen=gen, reset_fn=reset)
+    assert res.status == RunStatus.RESET_ERROR
+    assert seen[-1] == "pre_candidate_restore"
+    candidates = {s for _, s, _ in stand.chat_log if "-candidate-" in s}
+    assert len(candidates) == 1                       # второй кандидат не выполнялся
