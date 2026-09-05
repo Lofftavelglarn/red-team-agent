@@ -45,6 +45,7 @@ class ModelConfig:
     max_tokens: int
     temperature: float
     timeout_s: float
+    disable_thinking: bool
 
     def validate(self) -> None:
         missing = []
@@ -64,6 +65,13 @@ def model_config(role: str) -> ModelConfig:
     prefix = f"REDTEAM_{normalized.upper()}"
     base_url = os.getenv(f"{prefix}_BASE_URL", "").strip() or None
     default_temperature = "0.7" if normalized == "attacker" else "0"
+    # Reasoning-модели (Qwen3/huihui) без этого возвращают пустой content. По умолчанию
+    # глушим thinking у атакующего и НЕ трогаем судью (его провайдер может не принимать
+    # extra_body). Переопределяется REDTEAM_<ROLE>_DISABLE_THINKING=0/1.
+    default_disable_thinking = "1" if normalized == "attacker" else "0"
+    disable_thinking = os.getenv(
+        f"{prefix}_DISABLE_THINKING", default_disable_thinking
+    ).strip().lower() in {"1", "true", "yes", "on"}
     return ModelConfig(
         role=normalized,
         model=os.getenv(f"{prefix}_MODEL", "").strip(),
@@ -72,6 +80,7 @@ def model_config(role: str) -> ModelConfig:
         max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", "4096")),
         temperature=float(os.getenv(f"{prefix}_TEMPERATURE", default_temperature)),
         timeout_s=float(os.getenv(f"{prefix}_TIMEOUT", "120")),
+        disable_thinking=disable_thinking,
     )
 
 
