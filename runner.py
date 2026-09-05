@@ -214,6 +214,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         base_eid = None
         target_calls = 0
         attacker_calls = 0
+        accepted_mutations = 0
 
         try:
             # --- baseline жертвы (чистое состояние) ---
@@ -472,6 +473,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 ok, why = preserves_semantics(scenario, cand, semantic_judge=semantic_judge)
                 if not ok:
                     tw.meta["semantic_drift_rejected"] = why; break
+                accepted_mutations += 1
                 turns = cand.turns
                 cur_tags = cand.strategy_tags or scenario.tags
                 cur_hyp = cand.hypothesis
@@ -518,8 +520,13 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         tw.meta["end_to_end_reached"] = end_to_end
         tw.meta["first_failed_required_checkpoint"] = first_failed
         tw.meta["target_calls"] = target_calls
-        tw.meta["iterations"] = len(attempts)
-        tw.meta["attacker_calls"] = attacker_calls
+        # Кандидаты и мутации — РАЗНЫЕ величины: статический прогон выполняет один
+        # исходный кандидат и ноль мутаций (ТЗ P1-5).
+        tw.meta["candidate_attempts"] = len(attempts)
+        tw.meta["attacker_calls"] = attacker_calls          # все вызовы атакующей модели
+        tw.meta["accepted_mutations"] = accepted_mutations  # кандидаты, отправленные цели
+        tw.meta["mutation_iterations"] = attacker_calls
+        tw.meta["iterations"] = attacker_calls              # старое имя, теперь = мутации
         if infra_error is not None:
             tw.meta["infra_error"] = infra_error
             tw.run_status = RunStatus.INFRA_ERROR

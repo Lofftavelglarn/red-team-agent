@@ -92,7 +92,10 @@ def normalize_result(raw: dict) -> dict:
         meta["candidate_attempts"] = meta.get("iterations")
     if "attacker_calls" not in meta:
         meta["attacker_calls"] = None
+    if "accepted_mutations" not in meta:
+        meta["accepted_mutations"] = None
     if "mutation_iterations" not in meta:
+        # старые прогоны писали в `iterations` число кандидатов: мутаций было на одну меньше
         calls = meta.get("attacker_calls")
         attempts = meta.get("candidate_attempts")
         meta["mutation_iterations"] = calls if isinstance(calls, (int, float)) else (
@@ -238,7 +241,11 @@ def aggregate(run_dir: str) -> dict:
         "checkpoint_evaluation_errors": checkpoint_eval_errors,
         "false_positive_rate": false_positive,
         "avg_target_queries": _avg("target_calls"),
-        "avg_mutation_iterations": _avg("iterations"),
+        "avg_candidate_attempts": _avg("candidate_attempts"),
+        "avg_attacker_calls": _avg("attacker_calls"),
+        "avg_accepted_mutations": _avg("accepted_mutations"),
+        # старое имя сохранено для совместимости, но считается по мутациям, не кандидатам
+        "avg_mutation_iterations": _avg("mutation_iterations"),
         "rates": rates,
         "conditional": conditional,
         "per_scenario": per_scenario,
@@ -278,7 +285,9 @@ def _write_markdown(run_dir: str, report: dict) -> None:
           f"исключено из знаменателя: evaluation_error {fp['evaluation_errors']}, "
           f"unobserved {fp['unobserved']})",
           f"- среднее число обращений к цели: {report['avg_target_queries']}",
-          f"- среднее число итераций мутации: {report['avg_mutation_iterations']}"]
+          f"- среднее число выполненных кандидатов: {report['avg_candidate_attempts']}",
+          f"- среднее число вызовов атакующей модели: {report['avg_attacker_calls']}",
+          f"- среднее число принятых мутаций: {report['avg_accepted_mutations']}"]
     if report["low_observability_scenarios"]:
         L += ["", "## Низкая наблюдаемость (интерпретировать осторожно)", "",
               ", ".join(report["low_observability_scenarios"])]

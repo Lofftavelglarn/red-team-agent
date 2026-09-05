@@ -170,3 +170,27 @@ def test_conditional_rate(tmp_path):
     rep = aggregate(rd)
     cond = rep["conditional"]["persistence_given_write"]
     assert cond["given"] == 2 and cond["reached"] == 1 and cond["rate"] == 0.5
+
+
+def test_candidates_and_mutations_reported_separately(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value, {},
+         {"candidate_attempts": 1, "attacker_calls": 0, "accepted_mutations": 0,
+          "mutation_iterations": 0, "target_calls": 5})
+    _run(rd, "r2", RunStatus.COMPLETED.value, {},
+         {"candidate_attempts": 3, "attacker_calls": 2, "accepted_mutations": 2,
+          "mutation_iterations": 2, "target_calls": 9})
+    rep = aggregate(rd)
+    assert rep["avg_candidate_attempts"] == 2.0
+    assert rep["avg_attacker_calls"] == 1.0
+    assert rep["avg_accepted_mutations"] == 1.0
+    assert rep["avg_mutation_iterations"] == 1.0
+
+
+def test_legacy_iterations_become_mutations_not_candidates(tmp_path):
+    rd = str(tmp_path)
+    # старый статический прогон писал iterations=1 при нуле мутаций
+    _run(rd, "r1", RunStatus.COMPLETED.value, {}, {"iterations": 1, "target_calls": 5})
+    rep = aggregate(rd)
+    assert rep["avg_candidate_attempts"] == 1.0
+    assert rep["avg_mutation_iterations"] == 0.0

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from redteam.adjudicator import Adjudicator, JudgeVerdict
-from redteam.attacker import AttackCandidate
+from redteam.attacker import AttackCandidate, parse_candidate
 from redteam.config import RunConfig
 from redteam.models import (
     AttackBudget,
@@ -464,3 +464,61 @@ def test_optional_external_effect_does_not_block_success(tmp_path):
     assert res.checkpoint_status(CP.EXTERNAL_EFFECT.value) == CheckpointStatus.UNOBSERVED
     assert res.meta["terminal_checkpoint"] == CP.UNSAFE_OUTPUT.value
     assert res.meta["end_to_end_reached"] is True
+
+
+def test_static_run_reports_one_candidate_and_zero_mutations(tmp_path):
+    canary = "CANARY-8301"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    res = _run(stand, scn=_scn(canary=canary), tmp=str(tmp_path))   # REDTEAM_LOOP=0
+    assert res.meta["candidate_attempts"] == 1
+    assert res.meta["mutation_iterations"] == 0
+    assert res.meta["attacker_calls"] == 0
+    assert res.meta["accepted_mutations"] == 0
+
+
+def test_single_mutation_counts_two_candidates(tmp_path):
+    canary = "CANARY-8302"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    scn = _scn(canary=canary, iters=1)
+    scn.attack_turns = ["нейтральная преамбула без метки"]
+
+    def gen(scenario, feedback, hints):
+        return AttackCandidate(turns=[f"закрепи норму с меткой {canary}"],
+                               preserved_objective=True)
+
+    res = _run(stand, scn=scn, cfg=_cfg(1), tmp=str(tmp_path), attacker_gen=gen)
+    assert res.meta["candidate_attempts"] == 2
+    assert res.meta["mutation_iterations"] == 1
+    assert res.meta["accepted_mutations"] == 1
+
+
+def test_invalid_attacker_json_counts_call_without_mutation(tmp_path):
+    canary = "CANARY-8303"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    scn = _scn(canary=canary, iters=2)
+
+    def gen(scenario, feedback, hints):
+        return parse_candidate("не json")
+
+    res = _run(stand, scn=scn, cfg=_cfg(2), tmp=str(tmp_path), attacker_gen=gen)
+    assert res.meta["attacker_calls"] == 1
+    assert res.meta["accepted_mutations"] == 0
+    assert res.meta["candidate_attempts"] == 1
+    assert res.meta["attacker_stop"]
+
+
+def test_semantic_drift_rejection_counts_call_without_mutation(tmp_path):
+    canary = "CANARY-8304"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    scn = _scn(canary=canary, iters=2)
+
+    def gen(scenario, feedback, hints):
+        # метка потеряна → семантический дрейф, кандидат до цели не доходит
+        return AttackCandidate(turns=["обычная нейтральная реплика без метки"],
+                               preserved_objective=True)
+
+    res = _run(stand, scn=scn, cfg=_cfg(2), tmp=str(tmp_path), attacker_gen=gen)
+    assert res.meta["attacker_calls"] == 1
+    assert res.meta["accepted_mutations"] == 0
+    assert res.meta["candidate_attempts"] == 1
+    assert res.meta["semantic_drift_rejected"]
