@@ -336,3 +336,21 @@ def test_restore_detects_content_change_at_equal_counts(tmp_path):
         scenarios_module.get_suite = original
     assert report["aborted"] is True
     assert report["cleanup"]["baseline_restored"] is False
+
+
+def test_run_metadata_carries_cleanup_receipts(tmp_path):
+    _run(tmp_path)
+    runs = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
+            for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
+    receipts = runs[0]["meta"]["cleanup_receipts"]
+    operations = [r["operation"] for r in receipts]
+    assert operations == ["post_baseline_restore", "post_control_restore"]
+    assert all("fingerprint_before" in r and "restored" in r for r in receipts)
+
+
+def test_report_markdown_documents_cleanup(tmp_path):
+    _run(tmp_path)
+    text = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "## Очистка и изоляция" in text
+    assert "режим: scoped" in text
+    assert "восстановлено к baseline: да" in text

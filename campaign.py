@@ -147,13 +147,13 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                 print(f"  финальная очистка неполная: {final['errors']}", flush=True)
 
     from redteam.aggregate import aggregate
-    report = aggregate(run_dir)
+
+    cleanup_stats = _cleanup_stats(summary, receipts, baseline_fingerprint, keep_final_state)
+    cleanup_stats["baseline_layers"] = {k: v["count"] for k, v in baseline_state.items()}
+    report = aggregate(run_dir, extra={"cleanup": cleanup_stats})
     report["seed"] = seed
     report["actual_order"] = actual_order
     report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
-    report["cleanup"] = _cleanup_stats(summary, receipts, baseline_fingerprint,
-                                       keep_final_state)
-    report["cleanup"]["baseline_layers"] = {k: v["count"] for k, v in baseline_state.items()}
     report["aborted"] = bool(aborted)
     if aborted:
         report["abort_reason"] = {"operation": aborted["operation"],

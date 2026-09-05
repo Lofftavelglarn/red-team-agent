@@ -175,7 +175,23 @@ def _load_runs(run_dir: str) -> tuple[list[dict], int]:
     return runs, corrupt
 
 
-def aggregate(run_dir: str) -> dict:
+def _run_cleanup_summary(runs: list[dict]) -> dict:
+    """Сводка операций очистки по метаданным прогонов (без campaign-уровня)."""
+    operations = failed = 0
+    deleted: dict = {}
+    for r in runs:
+        for receipt in (r.get("meta") or {}).get("cleanup_receipts") or []:
+            operations += 1
+            if receipt.get("errors"):
+                failed += 1
+            for name, count in (receipt.get("deleted") or {}).items():
+                if isinstance(count, int):
+                    deleted[name] = deleted.get(name, 0) + count
+    return {"operations": operations, "failed_operations": failed,
+            "records_deleted": deleted}
+
+
+def aggregate(run_dir: str, extra: dict | None = None) -> dict:
     runs, corrupt = _load_runs(run_dir)
     total = len(runs)
     schema_versions: dict[str, int] = {}
@@ -324,7 +340,14 @@ def aggregate(run_dir: str) -> dict:
         },
         "per_scenario": per_scenario,
         "low_observability_scenarios": low_obs,
+        "cleanup": _run_cleanup_summary(valid),
     }
+    if extra:
+        for key, value in extra.items():
+            if key == "cleanup" and isinstance(value, dict):
+                report["cleanup"] = {**report["cleanup"], **value}
+            else:
+                report[key] = value
     with open(os.path.join(run_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     _write_markdown(run_dir, report)
@@ -388,6 +411,20 @@ def _write_markdown(run_dir: str, report: dict) -> None:
           f"- среднее число выполненных кандидатов: {report['avg_candidate_attempts']}",
           f"- среднее число вызовов атакующей модели: {report['avg_attacker_calls']}",
           f"- среднее число принятых мутаций: {report['avg_accepted_mutations']}"]
+    cleanup = report.get("cleanup") or {}
+    if cleanup:
+        L += ["", "## Очистка и изоляция", "",
+              f"- режим: {cleanup.get('mode', 'scoped')}",
+              f"- операций восстановления: {cleanup.get('operations')} "
+              f"(с ошибками: {cleanup.get('failed_operations')})",
+              f"- удалено записей: {cleanup.get('records_deleted')}"]
+        if "baseline_restored" in cleanup:
+            L += [f"- состояние стенда восстановлено к baseline: "
+                  f"{'да' if cleanup['baseline_restored'] else 'НЕТ'}",
+                  f"- baseline: {cleanup.get('initial_fingerprint')}",
+                  f"- финальный fingerprint: {cleanup.get('final_fingerprint')}"]
+        if cleanup.get("final_state_kept"):
+            L.append("- ВНИМАНИЕ: состояние оставлено по REDTEAM_KEEP_FINAL_STATE=1")
     if report["low_observability_scenarios"]:
         L += ["", "## Низкая наблюдаемость (интерпретировать осторожно)", "",
               ", ".join(report["low_observability_scenarios"])]

@@ -256,11 +256,22 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         attacker_calls = 0
         accepted_mutations = 0
 
+        def _record_receipt(operation: str, receipt, **labels) -> None:
+            """Событие + метаданные прогона: в каком состоянии выполнялась фаза."""
+            tw.event("reset", "harness", operation, receipt=receipt, **labels)
+            entry = {"operation": operation}
+            entry.update(labels)
+            if isinstance(receipt, dict):
+                entry.update({k: receipt.get(k) for k in
+                              ("mode", "deleted", "restored", "errors",
+                               "fingerprint_before", "fingerprint_after")})
+            tw.meta.setdefault("cleanup_receipts", []).append(entry)
+
         def _restore_phase(operation: str, **labels) -> None:
             """Вернуть стенд к состоянию кампании между экспериментальными фазами."""
             if reset_fn is None:
                 return
-            tw.event("reset", "harness", operation, receipt=reset_fn(), **labels)
+            _record_receipt(operation, reset_fn(), **labels)
 
         try:
             # --- baseline жертвы: отдельная экспериментальная ветка ---
@@ -352,8 +363,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
             while True:
                 if it > 0 and reset_fn is not None and cumulative is False:
-                    tw.event("reset", "harness", "pre_candidate_restore",
-                             receipt=reset_fn(), iteration=it)
+                    _record_receipt("pre_candidate_restore", reset_fn(), iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
                             and fingerprint_fn() != clean_fingerprint:
                         tw.run_status = RunStatus.CONTAMINATED_STATE
