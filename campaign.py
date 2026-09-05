@@ -91,6 +91,16 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     if initial["errors"]:
         raise RuntimeError(f"начальная очистка не удалась, кампания не запущена: "
                            f"{initial['errors']}")
+    # Остатки аварийно завершённой кампании нельзя включать в baseline: отравленное
+    # состояние стало бы эталоном. Удалять их автоматически тоже нельзя — рядом может
+    # идти чужой прогон.
+    stale = admin.stale_campaigns(scope)
+    if stale:
+        listing = ", ".join(f"{cid} ({count} записей)" for cid, count in stale.items())
+        raise RuntimeError(
+            f"в памяти стенда остались артефакты других red-team кампаний: {listing}. "
+            "Проверьте, не идёт ли параллельный прогон, затем удалите их: "
+            "python -m redteam.cleanup --stale --yes")
     # Изоляция проверяется возвратом именно к baseline стенда, а не к «всё пусто» —
     # чужие данные не должны требовать удаления.
     baseline_fingerprint = admin.fingerprint()

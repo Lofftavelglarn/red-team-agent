@@ -182,3 +182,36 @@ def test_disabled_mode_changes_nothing():
     assert receipt["deleted"] == {}
     assert db["dialog_sessions"].count_documents({}) == 2
     assert receipt["fingerprint_before"] == receipt["fingerprint_after"]
+
+
+def test_stale_campaign_artifacts_detected():
+    db, redis = _stand()
+    other = session_prefix("deadbee")
+    db["dialog_sessions"].insert_one({"session_id": other + "s2-0-candidate-0",
+                                      "user_id": "1001"})
+    db["agent_policy_memories"].insert_one({"policy_id": "p-stale", "statement": "остаток",
+                                            "source_session_id": other + "s2-0-candidate-0"})
+    redis.store[f"working:1001:{other}s2-0-victim-0"] = "остаток"
+    stale = MemoryAdmin(db, redis).stale_campaigns(_scope())
+    assert stale == {"deadbee": 3}
+
+
+def test_own_and_foreign_records_are_not_stale():
+    db, redis = _stand()
+    admin = MemoryAdmin(db, redis)
+    # своя кампания и ручные сессии без rt- префикса остатками не считаются
+    assert admin.stale_campaigns(_scope()) == {}
+
+
+def test_purge_campaign_removes_only_named_campaign():
+    db, redis = _stand()
+    other = session_prefix("deadbee")
+    db["dialog_sessions"].insert_one({"session_id": other + "s2-0-candidate-0",
+                                      "user_id": "1001"})
+    admin = MemoryAdmin(db, redis)
+    deleted = admin.purge_campaign("deadbee")
+    assert deleted["dialog_sessions"] == 1
+    assert admin.stale_campaigns(_scope()) == {}
+    # артефакты текущей кампании и чужие записи не тронуты
+    assert OURS in db.session_ids("dialog_sessions")
+    assert FOREIGN in db.session_ids("dialog_sessions")

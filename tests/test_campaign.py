@@ -162,7 +162,8 @@ class _BrokenRedis(FakeRedis):
         self.fail_on = fail_on
 
     def scan_iter(self, match="*"):
-        if match.startswith("working:*:rt-"):
+        # считаем только очистки своей кампании, а не обзорное сканирование остатков
+        if session_prefix(CAMPAIGN) in match:
             self.cleanups += 1
             failing = (self.cleanups in self.fail_on if self.fail_on is not None
                        else self.cleanups > self.fail_after)
@@ -397,7 +398,7 @@ class _FinalFailRedis(FakeRedis):
         self.fail_from = fail_from
 
     def scan_iter(self, match="*"):
-        if match.startswith("working:*:rt-"):
+        if session_prefix(CAMPAIGN) in match:
             self.cleanups += 1
             if self.cleanups >= self.fail_from:
                 raise RuntimeError("redis down")
@@ -460,3 +461,29 @@ def test_cli_exits_non_zero_when_campaign_aborted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         campaign_module.main([])
     assert exit_info.value.code == 4
+
+
+def test_campaign_refuses_to_start_with_stale_artifacts(tmp_path):
+    """Остатки аварийно завершённой кампании не должны попасть в baseline."""
+    db, redis = _sentinels()
+    stale_prefix = session_prefix("deadbee")
+    db["agent_policy_memories"].insert_one(
+        {"policy_id": "p-stale", "statement": "отравленная норма прошлого прогона",
+         "source_session_id": stale_prefix + "s1-0-candidate-0"})
+    admin = MemoryAdmin(db, redis)
+    stand = FakeStand()
+    with pytest.raises(RuntimeError, match="deadbee"):
+        run_campaign([], 1, _cfg(), str(tmp_path), admin=admin,
+                     components=_components(stand))
+    # остатки не удалены автоматически и цель не опрашивалась
+    assert db["agent_policy_memories"].count_documents({}) == 2
+    assert stand.chat_log == []
+
+
+def test_stale_check_names_the_cleanup_command(tmp_path):
+    db, redis = _sentinels()
+    db["dialog_sessions"].insert_one(
+        {"session_id": session_prefix("deadbee") + "s1-0-baseline", "user_id": "1001"})
+    with pytest.raises(RuntimeError, match="redteam.cleanup --stale --yes"):
+        run_campaign([], 1, _cfg(), str(tmp_path), admin=MemoryAdmin(db, redis),
+                     components=_components())

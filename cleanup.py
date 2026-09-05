@@ -29,6 +29,8 @@ Scoped-очистка опирается на реальные поля схем
   python -m redteam.cleanup                  # показать agent_policy
   python -m redteam.cleanup --yes            # удалить все agent_policy
   python -m redteam.cleanup --yes --redteam-only   # только rt-/atk- сессии
+  python -m redteam.cleanup --stale          # показать остатки прежних кампаний
+  python -m redteam.cleanup --stale --yes    # удалить их
   python -m redteam.cleanup --full --yes     # полный сброс (нужен opt-in, см. ниже)
 
 Модуль работает напрямую с MongoDB/Redis по REDTEAM_MONGO_* и REDTEAM_REDIS_URL;
@@ -225,6 +227,43 @@ class MemoryAdmin:
             raise ResetError(f"redis scoped cleanup failed: {exc}") from exc
         return deleted
 
+    # ---------- остатки прежних кампаний ----------
+    def stale_campaigns(self, scope: CampaignScope) -> dict[str, int]:
+        """Найти артефакты red-team кампаний, отличных от текущей.
+
+        Аварийно остановленный контейнер не выполняет финальную очистку, поэтому его
+        записи переживают запуск. Молча включить их в baseline нельзя: отравленное
+        состояние стало бы «исходным». Автоматически они НЕ удаляются — чужой прогон
+        может идти прямо сейчас.
+        """
+        found: dict[str, int] = {}
+
+        def _count(session_id: str) -> None:
+            text = str(session_id or "")
+            if not text.startswith("rt-") or scope.owns_session(text):
+                return
+            campaign = text.split("-")[1] if len(text.split("-")) > 1 else "unknown"
+            found[campaign] = found.get(campaign, 0) + 1
+
+        for collection in ("dialog_sessions", "episodic_memories"):
+            for doc in self.db[collection].find({"session_id": {"$regex": "^rt-"}},
+                                                {"session_id": 1, "_id": 0}):
+                _count(doc.get("session_id"))
+        for doc in self.db["agent_policy_memories"].find(
+                {"source_session_id": {"$regex": "^rt-"}}, {"source_session_id": 1, "_id": 0}):
+            _count(doc.get("source_session_id"))
+        try:
+            for key in self.redis.scan_iter(match="working:*:rt-*"):
+                _count(_as_text(key).split(":", 2)[-1])
+        except Exception as exc:  # noqa: BLE001
+            raise ResetError(f"redis unavailable: {exc}") from exc
+        return dict(sorted(found.items()))
+
+    def purge_campaign(self, campaign_id: str, user_ids: list[str] | None = None) -> dict:
+        """Явно удалить артефакты указанной кампании (ручная операция оператора)."""
+        return self.scoped_reset(CampaignScope(campaign_id=campaign_id,
+                                               user_ids=list(user_ids or [])))
+
     # ---------- full ----------
     def full_reset(self, *, allow_full_reset: bool = False) -> dict:
         """Полная очистка выбранной БД. Требует явного подтверждения вызывающей стороны.
@@ -297,6 +336,24 @@ def is_clean(user_ids: list[str] | None = None) -> bool:
 
 def main(argv: list[str]) -> None:
     from redteam.config import ALLOW_FULL_RESET
+
+    if "--stale" in argv:
+        admin = MemoryAdmin()
+        scope = CampaignScope(campaign_id="__none__")
+        stale = admin.stale_campaigns(scope)
+        if not stale:
+            print("остатков прежних red-team кампаний нет")
+            return
+        print("остатки прежних кампаний (campaign_id: записей):")
+        for campaign, count in stale.items():
+            print(f"  {campaign}: {count}")
+        if "--yes" not in argv:
+            print("\nДобавьте --yes чтобы удалить их, или --campaign <id> --yes для одной.")
+            return
+        targets = [argv[argv.index("--campaign") + 1]] if "--campaign" in argv else list(stale)
+        for campaign in targets:
+            print(f"  {campaign}: {admin.purge_campaign(campaign)}")
+        return
 
     if "--full" in argv:
         if "--yes" not in argv:
