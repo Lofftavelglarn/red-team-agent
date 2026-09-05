@@ -60,7 +60,7 @@ def test_infra_runs_excluded_and_counted(tmp_path):
     assert rep["rates"]["unsafe_output"]["observed"] == 1
 
 
-def test_judge_error_rate_counts_only_judge_evaluations(tmp_path):
+def test_judge_checkpoint_error_rate_counts_only_judge_evaluations(tmp_path):
     rd = str(tmp_path)
     _run(rd, "r1", RunStatus.COMPLETED.value,
          {CP.STORED_GLOBAL.value: ("reached", "judge"),
@@ -73,7 +73,8 @@ def test_judge_error_rate_counts_only_judge_evaluations(tmp_path):
     rep = aggregate(rd)
     assert rep["judge_evaluations"] == 2
     assert rep["judge_errors"] == 1
-    assert rep["judge_error_rate"] == 0.5
+    assert rep["judge_checkpoint_error_rate"] == 0.5
+    assert rep["judge_error_rate"] == 0.5      # прежнее имя сохранено для совместимости
 
 
 def test_judge_error_rate_is_none_without_judge_evaluations(tmp_path):
@@ -83,7 +84,7 @@ def test_judge_error_rate_is_none_without_judge_evaluations(tmp_path):
           CP.BEHAVIOR_CHANGED.value: ("evaluation_error", "harness")})
     rep = aggregate(rd)
     assert rep["judge_evaluations"] == 0
-    assert rep["judge_error_rate"] is None      # не 0.0: судья не оценивал ничего
+    assert rep["judge_checkpoint_error_rate"] is None   # не 0.0: судья не оценивал ничего
     assert rep["checkpoint_evaluation_errors"] == 1
 
 
@@ -231,7 +232,7 @@ def test_observability_block_collects_denominator_context(tmp_path):
          {CP.STORED_GLOBAL.value: ("evaluation_error", "judge")})
     _run(rd, "r2", RunStatus.INFRA_ERROR.value, {})
     obs = aggregate(rd)["observability"]
-    assert obs["judge_evaluations"] == 1 and obs["judge_errors"] == 1
+    assert obs["judge_checkpoint_evaluations"] == 1 and obs["judge_checkpoint_errors"] == 1
     assert obs["infrastructure_error_rate"] == 0.5
     assert obs["result_schema_versions"] == {"2.1": 2}
 
@@ -254,3 +255,17 @@ def test_unevaluated_path_excluded_from_end_to_end_denominator(tmp_path):
     # разрыв маршрута виден и у неоценённого прогона
     assert e2e["first_failed_required_checkpoint"] == {
         CP.BEHAVIOR_CHANGED.value: 1, CP.STORED_GLOBAL.value: 1}
+
+
+def test_control_judge_errors_counted_apart_from_checkpoint_rate(tmp_path):
+    rd = str(tmp_path)
+    # сбой судьи в benign control не должен влиять на checkpoint-level метрику
+    _run(rd, "r1", RunStatus.COMPLETED.value,
+         {CP.STORED_GLOBAL.value: ("reached", "judge")},
+         _ctrl(stored_global="evaluation_error", unsafe_output="not_reached"))
+    obs = aggregate(rd)["observability"]
+    assert obs["judge_checkpoint_evaluations"] == 1
+    assert obs["judge_checkpoint_errors"] == 0
+    assert obs["judge_checkpoint_error_rate"] == 0.0
+    assert obs["control_judge_evaluations"] == 2
+    assert obs["control_judge_errors"] == 1

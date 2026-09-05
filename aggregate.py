@@ -1,8 +1,9 @@
 """Агрегация результатов кампании без survivorship bias.
 
 Знаменатель у каждой метрики свой и назван явно: доли по стадиям считаются по
-НАБЛЮДАВШИМСЯ прогонам, ошибки судьи — по чекпоинтам, которые судья действительно
-оценивал, false-positive rate — по контролям с определённым исходом.
+НАБЛЮДАВШИМСЯ прогонам, `judge_checkpoint_error_rate` — по итоговым чекпоинтам, которые
+судья действительно оценивал (вызовы судьи в benign control и в проверке семантического
+дрейфа считаются отдельно), false-positive rate — по контролям с определённым исходом.
 
 Читает ВСЕ подкаталоги runs/<run-id>/result.json (не только успешные трассы). Считает
 раздельные доли по стадиям и условные вероятности. UNOBSERVED, NOT_APPLICABLE и
@@ -187,13 +188,23 @@ def aggregate(run_dir: str) -> dict:
     # attack-доли считаем только по прогонам, дошедшим до adjudication.
     valid = [r for r in runs if r["status"] == RunStatus.COMPLETED.value]
 
-    # judge error rate: знаменатель — только чекпоинты, которые ДЕЙСТВИТЕЛЬНО оценивал
-    # судья. Детерминированные, harness- и infra-оценки в него не входят, иначе одна
-    # ошибка растворяется в десятках неоцениваемых судьёй чекпоинтов (ТЗ P0-3).
+    # judge error rate: знаменатель — только ИТОГОВЫЕ чекпоинты, которые действительно
+    # оценивал судья. Детерминированные, harness- и infra-оценки в него не входят, иначе
+    # одна ошибка растворяется в десятках неоцениваемых судьёй чекпоинтов (ТЗ P0-3).
+    # Это checkpoint-level метрика: вызовы судьи в benign control и в проверке
+    # семантического дрейфа мутации сюда НЕ входят и считаются отдельно.
     judge_evaluations = [cp for r in valid for cp in r["checkpoints"].values()
                          if str(cp.get("evaluator", "")).startswith("judge")]
     judge_errors = sum(1 for cp in judge_evaluations
                        if cp.get("status") == CheckpointStatus.EVALUATION_ERROR.value)
+    control_judge_evaluations = control_judge_errors = 0
+    for r in valid:
+        for check in ((r.get("meta") or {}).get("control") or {}).values():
+            if not str(check.get("evaluator", "")).startswith("judge"):
+                continue
+            control_judge_evaluations += 1
+            if check.get("status") == CheckpointStatus.EVALUATION_ERROR.value:
+                control_judge_errors += 1
     # отдельно — все чекпоинты со сбоем оценки (включая проброшенные вниз по маршруту)
     checkpoint_eval_errors = sum(
         1 for r in valid for cp in r["checkpoints"].values()
@@ -281,6 +292,9 @@ def aggregate(run_dir: str) -> dict:
         "infrastructure_error_rate": round(len(infra) / total, 3) if total else None,
         "judge_evaluations": len(judge_evaluations),
         "judge_errors": judge_errors,
+        "judge_checkpoint_error_rate": (round(judge_errors / len(judge_evaluations), 3)
+                                        if judge_evaluations else None),
+        # прежнее имя оставлено для совместимости отчётов; величина та же, checkpoint-level
         "judge_error_rate": (round(judge_errors / len(judge_evaluations), 3)
                              if judge_evaluations else None),
         "checkpoint_evaluation_errors": checkpoint_eval_errors,
@@ -294,10 +308,12 @@ def aggregate(run_dir: str) -> dict:
         "rates": rates,
         "conditional": conditional,
         "observability": {
-            "judge_evaluations": len(judge_evaluations),
-            "judge_errors": judge_errors,
-            "judge_error_rate": (round(judge_errors / len(judge_evaluations), 3)
-                                 if judge_evaluations else None),
+            "judge_checkpoint_evaluations": len(judge_evaluations),
+            "judge_checkpoint_errors": judge_errors,
+            "judge_checkpoint_error_rate": (round(judge_errors / len(judge_evaluations), 3)
+                                            if judge_evaluations else None),
+            "control_judge_evaluations": control_judge_evaluations,
+            "control_judge_errors": control_judge_errors,
             "checkpoint_evaluation_errors": checkpoint_eval_errors,
             "infrastructure_error_rate": round(len(infra) / total, 3) if total else None,
             "n_unsupported": len(unsupported),
@@ -332,7 +348,7 @@ def _write_markdown(run_dir: str, report: dict) -> None:
          f"Прогонов: {report['n_runs']} | дошло до adjudication: {report['n_completed']} | "
          f"unsupported: {report['n_unsupported']} | повреждённых result.json: {report['n_corrupt_results']} | "
          f"инфраструктурные ошибки: {report['infrastructure_error_rate']} | "
-         f"ошибки/абстейн судьи: {report['judge_error_rate']} "
+         f"ошибки/абстейн судьи по чекпоинтам: {report['judge_checkpoint_error_rate']} "
          f"({report['judge_errors']}/{report['judge_evaluations']} оценок судьи)", "",
          "Знаменатель каждой доли — только НАБЛЮДАВШИЕСЯ прогоны (reached|not_reached). "
          "UNOBSERVED / NOT_APPLICABLE / EVALUATION_ERROR исключены (не считаются неуспехом), "
@@ -356,8 +372,11 @@ def _write_markdown(run_dir: str, report: dict) -> None:
     fp = report["false_positive_rate"]
     obs = report["observability"]
     L += ["", "## Наблюдаемость и ошибки", "",
-          f"- оценок судьи: {obs['judge_evaluations']}, из них сбоев/абстейнов: "
-          f"{obs['judge_errors']} (rate {obs['judge_error_rate']})",
+          f"- оценок судьи по итоговым чекпоинтам: {obs['judge_checkpoint_evaluations']}, "
+          f"из них сбоев/абстейнов: {obs['judge_checkpoint_errors']} "
+          f"(judge_checkpoint_error_rate {obs['judge_checkpoint_error_rate']})",
+          f"- оценок судьи в benign control: {obs['control_judge_evaluations']}, "
+          f"из них сбоев: {obs['control_judge_errors']} (в rate выше не входят)",
           f"- чекпоинтов со сбоем оценки всего: {obs['checkpoint_evaluation_errors']}",
           f"- версии схемы результатов: {obs['result_schema_versions']}", "",
           "## Контроль качества", "",
