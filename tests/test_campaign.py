@@ -252,3 +252,38 @@ def test_keep_final_state_is_opt_in_and_reported(tmp_path, monkeypatch):
     assert final["deleted"] == {}          # состояние намеренно не тронуто
     # чужие записи по-прежнему целы даже в отладочном режиме
     assert db["agent_policy_memories"].count_documents({}) == 1
+
+
+def test_unsupported_scenario_does_not_touch_memory(tmp_path):
+    scn = _scenario(requirements=["внешняя веб-страница с canary"])
+    db, redis = _sentinels()
+    admin = MemoryAdmin(db, redis)
+    before = admin.fingerprint()
+    stand = FakeStand()
+    report, _, _, _ = _run(tmp_path, scenarios=[scn], stand=stand, admin=admin)
+    # ни очистки, ни обращений к цели: сценарий отклонён до разрушительных операций
+    assert admin.fingerprint() == before
+    assert stand.chat_log == []
+    assert set(report["cleanup"]["records_deleted"].values()) <= {0}
+    saved = [json.loads((tmp_path / d / "result.json").read_text(encoding="utf-8"))
+             for d in os.listdir(tmp_path) if (tmp_path / d).is_dir()]
+    assert saved[0]["status"] == "unsupported"
+    assert saved[0]["meta"]["unsupported_reasons"]
+
+
+def test_unsupported_scenario_does_not_block_others(tmp_path):
+    scenarios = [_scenario(id="s1", requirements=["фикстура"]), _scenario(id="s2")]
+    stand = FakeStand()
+    report, _, _, _ = _run(tmp_path, scenarios=scenarios, stand=stand)
+    assert report["n_runs"] == 2
+    assert report["aborted"] is False
+    # второй сценарий действительно выполнялся
+    assert any("s2" in session for _, session, _ in stand.chat_log)
+
+
+def test_unreachable_stores_stop_campaign_before_cleanup(tmp_path):
+    db, _ = _sentinels()
+    admin = MemoryAdmin(db, FakeRedis(fail=True))
+    with pytest.raises(RuntimeError, match="хранилища стенда недоступны"):
+        run_campaign([], 1, _cfg(), str(tmp_path), admin=admin, components=_components())
+    assert db["dialog_sessions"].count_documents({}) == 1

@@ -65,6 +65,11 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     summary = cleanup_summary(mode)
     print("  очистка: " + ", ".join(f"{k}={v}" for k, v in summary.items()), flush=True)
     admin = admin if admin is not None else MemoryAdmin()
+    # доступность хранилищ проверяем до разрушительных операций
+    try:
+        admin.layer_state()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"хранилища стенда недоступны, кампания не запущена: {exc}") from exc
     scope = CampaignScope(campaign_id=cfg.campaign_id,
                           user_ids=[cfg.attacker_user, cfg.victim_user, cfg.secondary_user],
                           started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -106,7 +111,8 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     try:
         results, aborted = _run_scenarios(
             order, repeats, cfg, run_dir, _restore, _write_reset_error,
-            target, observer, adj, library, fixtures_ready, admin)
+            target, observer, adj, library, fixtures_ready, admin,
+            _write_unsupported)
     finally:
         # Финальное восстановление обязано выполниться при любом исходе: успех, ошибка
         # цели/судьи/атакующей модели, исключение в runner, Ctrl+C.
@@ -146,7 +152,8 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
 
 
 def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
-                   target, observer, adj, library, fixtures_ready, admin):
+                   target, observer, adj, library, fixtures_ready, admin,
+                   write_unsupported):
     """Последовательный прогон сценариев. Возвращает (результаты, причина остановки)."""
     from redteam.runner import run_scenario
 
@@ -155,6 +162,14 @@ def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
     for sc in order:
         if aborted:
             break
+        # Требования проверяются ДО очистки: неисполнимый сценарий не должен сначала
+        # стирать память стенда и только потом сообщать, что запускаться не может.
+        unsupported = scenario_blockers(sc, fixtures_ready)
+        if unsupported:
+            print(f"=== {sc.id}: пропуск ({'; '.join(unsupported)}) ===", flush=True)
+            for k in range(repeats):
+                results.append(write_unsupported(run_dir, sc, cfg, k, unsupported))
+            continue
         for k in range(repeats):
             # PRE-RUN восстановление: снимаем артефакты предыдущего сценария этой кампании.
             pre = restore_fn("pre_scenario_restore", scenario_id=sc.id, repeat=k)
@@ -187,6 +202,40 @@ def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
             print(f"  status={res.status.value} e2e={res.meta.get('end_to_end_reached')} | {line}", flush=True)
 
     return results, aborted
+
+
+def scenario_blockers(scenario, fixtures_ready: bool) -> list[str]:
+    """Почему сценарий нельзя выполнить на этом стенде (пустой список = можно)."""
+    problems = []
+    if scenario.requirements and not fixtures_ready:
+        problems.append(f"нет фикстур: {scenario.requirements}")
+    return problems
+
+
+def _write_unsupported(run_dir: str, scenario, cfg: RunConfig, repeat: int,
+                       problems: list[str]):
+    """Сохранить UNSUPPORTED-прогон, не тронув память стенда."""
+    from redteam.models import CheckpointResult, CheckpointStatus
+    from redteam.trace import TraceWriter
+
+    run_id = f"{scenario.id}-{uuid.uuid4().hex[:8]}"
+    subdir = os.path.join(run_dir, run_id)
+    os.makedirs(subdir, exist_ok=True)
+    manifest = {"config": cfg.to_meta(), "scenario_id": scenario.id,
+                "campaign_id": cfg.campaign_id, "repeat": repeat,
+                "expected_path": scenario.expected_path,
+                "required_path": scenario.required_success_path()}
+    with TraceWriter(subdir, scenario.id, run_id, manifest) as tw:
+        tw.event("note", "harness", {"unsupported": problems})
+        for name in scenario.expected_path:
+            tw.set_checkpoint(CheckpointResult(
+                name=name, status=CheckpointStatus.UNOBSERVED,
+                reason="; ".join(problems), evaluator="infra"))
+        tw.meta["requirements"] = scenario.requirements
+        tw.meta["unsupported_reasons"] = problems
+        tw.run_status = RunStatus.UNSUPPORTED
+        result = tw.build_result()
+    return result
 
 
 def _write_reset_error(run_dir: str, scenario, cfg: RunConfig, repeat: int,
