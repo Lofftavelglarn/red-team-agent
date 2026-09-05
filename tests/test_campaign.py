@@ -124,7 +124,8 @@ def test_cleanup_receipts_recorded_in_campaign_json(tmp_path):
     assert saved["cleanup"]["cleanup_mode"] == "scoped"
     assert saved["cleanup_receipts"], "receipts не записаны"
     first = saved["cleanup_receipts"][0]
-    assert first["operation"] == "pre_scenario_restore"
+    assert first["operation"] == "campaign_initial_restore"
+    assert [r["operation"] for r in saved["cleanup_receipts"]][1] == "pre_scenario_restore"
     assert first["campaign_id"] == CAMPAIGN
     assert "fingerprint_before" in first and "fingerprint_after" in first
     assert report["cleanup"]["operations"] == len(saved["cleanup_receipts"])
@@ -152,20 +153,25 @@ def test_report_counts_cleanup_operations(tmp_path):
 
 
 class _BrokenRedis(FakeRedis):
-    """Redis, падающий на очистке: Mongo уже очищена, состояние частично сброшено."""
+    """Redis, падающий на N-й очистке: Mongo уже очищена, состояние частично сброшено."""
 
-    def delete(self, *keys):
-        raise RuntimeError("redis down")
+    def __init__(self, keys=None, fail_after: int = 1):
+        super().__init__(keys)
+        self.cleanups = 0
+        self.fail_after = fail_after
 
     def scan_iter(self, match="*"):
         if match.startswith("working:*:rt-"):
-            raise RuntimeError("redis down")
+            self.cleanups += 1
+            if self.cleanups > self.fail_after:
+                raise RuntimeError("redis down")
         return super().scan_iter(match)
 
 
 def test_failed_reset_stops_before_any_attack(tmp_path):
     db, _ = _sentinels()
     stand = FakeStand()
+    # первая (начальная) очистка проходит, восстановление перед сценарием падает
     admin = MemoryAdmin(db, _BrokenRedis({f"working:9999:{FOREIGN_SESSION}": "manual"}))
     report, _, _, _ = _run(tmp_path, stand=stand, admin=admin)
     assert stand.chat_log == []                    # цель не опрашивалась
@@ -287,3 +293,46 @@ def test_unreachable_stores_stop_campaign_before_cleanup(tmp_path):
     with pytest.raises(RuntimeError, match="хранилища стенда недоступны"):
         run_campaign([], 1, _cfg(), str(tmp_path), admin=admin, components=_components())
     assert db["dialog_sessions"].count_documents({}) == 1
+
+
+def test_initial_cleanup_failure_stops_campaign(tmp_path):
+    db, _ = _sentinels()
+    admin = MemoryAdmin(db, _BrokenRedis(fail_after=0))
+    with pytest.raises(RuntimeError, match="начальная очистка"):
+        run_campaign([], 1, _cfg(), str(tmp_path), admin=admin, components=_components())
+
+
+def test_baseline_snapshot_preserves_foreign_data(tmp_path):
+    report, _, db, _ = _run(tmp_path)
+    layers = report["cleanup"]["baseline_layers"]
+    # baseline не требует пустого стенда: чужие записи входят в эталон
+    assert layers == {"dialog": 1, "episodic": 1, "semantic": 1, "policies": 1, "working": 1}
+    assert report["cleanup"]["baseline_restored"] is True
+
+
+def test_restore_detects_content_change_at_equal_counts(tmp_path):
+    """Изоляция ломается при подмене содержимого без изменения числа документов."""
+    db, redis = _sentinels()
+    admin = MemoryAdmin(db, redis)
+    scenarios = [_scenario(id="s1"), _scenario(id="s2")]
+    import redteam.scenarios as scenarios_module
+    original = scenarios_module.get_suite
+    scenarios_module.get_suite = lambda include_disabled=False: list(scenarios)
+    calls = {"n": 0}
+    real_scoped = admin.scoped_reset
+
+    def tamper(scope):
+        deleted = real_scoped(scope)
+        calls["n"] += 1
+        if calls["n"] == 2:      # после снятия baseline, при восстановлении перед s1
+            db["agent_policy_memories"].docs[0]["statement"] = "подменённая чужая норма"
+        return deleted
+
+    admin.scoped_reset = tamper
+    try:
+        report = run_campaign([], 1, _cfg(), str(tmp_path), admin=admin,
+                              components=_components())
+    finally:
+        scenarios_module.get_suite = original
+    assert report["aborted"] is True
+    assert report["cleanup"]["baseline_restored"] is False

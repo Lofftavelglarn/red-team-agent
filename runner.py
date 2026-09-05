@@ -226,13 +226,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
     infra_error = None
 
     with tw:
-        # --- изоляция: fingerprint чистого состояния (pre-run reset делает кампания = full) ---
+        # --- изоляция: состояние обязано совпадать с baseline кампании ---
+        # Сравнение идёт не с «все слои пусты», а с зафиксированным до кампании
+        # состоянием стенда: чужие данные не должны требовать удаления.
         if fingerprint_fn is not None and clean_fingerprint is not None:
             fp = fingerprint_fn()
-            tw.event("fingerprint", "harness", fp, expected=clean_fingerprint)
+            tw.event("fingerprint", "harness", fp, expected=clean_fingerprint,
+                     relative_to="campaign_baseline")
             if fp != clean_fingerprint:
                 tw.run_status = RunStatus.CONTAMINATED_STATE
                 tw.meta["contaminated_fingerprint"] = fp
+                tw.meta["expected_fingerprint"] = clean_fingerprint
                 return tw.build_result()
 
         # --- требования сценария невыполнимы (нет фикстуры) → UNSUPPORTED, не neуспех ---

@@ -75,7 +75,27 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                           started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     receipts: list[dict] = []
     keep_final_state = KEEP_FINAL_STATE
+
+    def _restore_raw(operation: str, expected_fingerprint=None, **labels) -> dict:
+        receipt = restore(admin, scope, operation=operation, mode=mode,
+                          allow_full_reset=ALLOW_FULL_RESET,
+                          expected_fingerprint=expected_fingerprint, **labels)
+        receipts.append(receipt)
+        return receipt
+
+    # Сначала снимаем возможные остатки этого campaign_id, и только потом фиксируем
+    # baseline: иначе собственный артефакт попал бы в эталон и любое восстановление
+    # выглядело бы как расхождение.
+    initial = _restore_raw("campaign_initial_restore")
+    if initial["errors"]:
+        raise RuntimeError(f"начальная очистка не удалась, кампания не запущена: "
+                           f"{initial['errors']}")
+    # Изоляция проверяется возвратом именно к baseline стенда, а не к «всё пусто» —
+    # чужие данные не должны требовать удаления.
     baseline_fingerprint = admin.fingerprint()
+    baseline_state = admin.layer_state()
+    print(f"  baseline: {baseline_fingerprint} "
+          + ", ".join(f"{k}={v['count']}" for k, v in baseline_state.items()), flush=True)
 
     os.makedirs(run_dir, exist_ok=True)
     scenarios = [by_id(i) for i in scenario_ids] if scenario_ids \
@@ -101,10 +121,8 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     library = StrategyLibrary(os.path.join(run_dir, "strategy_library.jsonl"))
 
     def _restore(operation: str, **labels) -> dict:
-        receipt = restore(admin, scope, operation=operation, mode=mode,
-                          allow_full_reset=ALLOW_FULL_RESET, **labels)
-        receipts.append(receipt)
-        return receipt
+        """Восстановить состояние кампании и сверить его с baseline_snapshot."""
+        return _restore_raw(operation, expected_fingerprint=baseline_fingerprint, **labels)
 
     results = []
     aborted = None
@@ -112,7 +130,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
         results, aborted = _run_scenarios(
             order, repeats, cfg, run_dir, _restore, _write_reset_error,
             target, observer, adj, library, fixtures_ready, admin,
-            _write_unsupported)
+            _write_unsupported, baseline_fingerprint)
     finally:
         # Финальное восстановление обязано выполниться при любом исходе: успех, ошибка
         # цели/судьи/атакующей модели, исключение в runner, Ctrl+C.
@@ -124,8 +142,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                              "errors": [], "restored": False,
                              "kept_by_request": True})
         else:
-            final = _restore("campaign_final_restore",
-                             expected_fingerprint=baseline_fingerprint)
+            final = _restore("campaign_final_restore")
             if not final["restored"]:
                 print(f"  финальная очистка неполная: {final['errors']}", flush=True)
 
@@ -136,6 +153,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
     report["cleanup"] = _cleanup_stats(summary, receipts, baseline_fingerprint,
                                        keep_final_state)
+    report["cleanup"]["baseline_layers"] = {k: v["count"] for k, v in baseline_state.items()}
     report["aborted"] = bool(aborted)
     if aborted:
         report["abort_reason"] = {"operation": aborted["operation"],
@@ -153,7 +171,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
 
 def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
                    target, observer, adj, library, fixtures_ready, admin,
-                   write_unsupported):
+                   write_unsupported, baseline_fingerprint=None):
     """Последовательный прогон сценариев. Возвращает (результаты, причина остановки)."""
     from redteam.runner import run_scenario
 
@@ -191,6 +209,7 @@ def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
                     target, observer, adj, sc, cfg, run_dir,
                     baseline_answer=None,  # baseline берётся в runner per-run (без кэша)
                     reset_fn=reset_fn, fingerprint_fn=fp_fn,
+                    clean_fingerprint=baseline_fingerprint,
                     strategy_library=library, fixtures_ready=fixtures_ready, repeat=k)
             except Exception as exc:  # noqa: BLE001 — устойчивость: сбой одного не рушит кампанию
                 print(f"  ОШИБКА прогона: {exc!r}", flush=True)
