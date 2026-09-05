@@ -27,6 +27,7 @@ def _base(**kw):
         benign_control_turns=["нейтральная реплика"],
         benign_control_probes=["проба"],
         expected_path=[Checkpoint.STORED_GLOBAL.value],
+        required_path=[Checkpoint.STORED_GLOBAL.value],
         success_contract=SuccessContract(canaries=["CANARY-1234"], payload_desc="p"),
     )
     d.update(kw)
@@ -98,3 +99,74 @@ def test_verify_deterministic_requires_signal():
                                                 payload_desc="p"))
     problems = validate_scenario(sc)
     assert any("verify=deterministic" in p for p in problems)
+
+
+def test_required_path_outside_expected_rejected():
+    sc = _base(expected_path=[Checkpoint.WRITE_ACCEPTED.value],
+               required_path=[Checkpoint.STORED_GLOBAL.value])
+    problems = validate_scenario(sc)
+    assert any("вне expected_path" in p for p in problems)
+
+
+def test_required_path_order_must_match_expected():
+    sc = _base(expected_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.STORED_GLOBAL.value],
+               required_path=[Checkpoint.STORED_GLOBAL.value, Checkpoint.WRITE_ACCEPTED.value])
+    problems = validate_scenario(sc)
+    assert any("порядок required_path" in p for p in problems)
+
+
+def test_required_path_duplicates_rejected():
+    sc = _base(expected_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.STORED_GLOBAL.value],
+               required_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.WRITE_ACCEPTED.value,
+                              Checkpoint.STORED_GLOBAL.value])
+    problems = validate_scenario(sc)
+    assert any("повторяющиеся чекпоинты" in p for p in problems)
+
+
+def test_empty_required_path_rejected_for_enabled_scenario():
+    sc = _base(required_path=[])
+    problems = validate_scenario(sc)
+    assert any("пустой required_path" in p for p in problems)
+    disabled = _base(required_path=[], enabled_by_default=False)
+    assert not any("пустой required_path" in p for p in validate_scenario(disabled))
+
+
+def test_unobservable_checkpoint_cannot_be_required_without_fixture():
+    sc = _base(expected_path=[Checkpoint.STORED_GLOBAL.value, Checkpoint.EXTERNAL_EFFECT.value],
+               required_path=[Checkpoint.STORED_GLOBAL.value, Checkpoint.EXTERNAL_EFFECT.value],
+               tags=["tool"])
+    assert any("ненаблюдаемые чекпоинты" in p for p in validate_scenario(sc))
+    with_fixture = _base(
+        expected_path=[Checkpoint.STORED_GLOBAL.value, Checkpoint.EXTERNAL_EFFECT.value],
+        required_path=[Checkpoint.STORED_GLOBAL.value, Checkpoint.EXTERNAL_EFFECT.value],
+        tags=["tool"], requirements=["телеметрия tool-call жертвы"])
+    assert not any("ненаблюдаемые чекпоинты" in p for p in validate_scenario(with_fixture))
+
+
+def test_terminal_checkpoint_is_last_required_element():
+    sc = _base(expected_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.STORED_GLOBAL.value,
+                              Checkpoint.EXTERNAL_EFFECT.value],
+               required_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.STORED_GLOBAL.value],
+               tags=["tool"])
+    # терминал берётся из маршрута, а не из максимальной глубины expected_path
+    assert sc.terminal_checkpoint() == Checkpoint.STORED_GLOBAL.value
+    assert sc.required_success_path() == [Checkpoint.WRITE_ACCEPTED.value,
+                                          Checkpoint.STORED_GLOBAL.value]
+
+
+def test_required_path_defaults_to_expected_path():
+    sc = _base(expected_path=[Checkpoint.WRITE_ACCEPTED.value, Checkpoint.STORED_GLOBAL.value],
+               required_path=[])
+    assert sc.required_success_path() == sc.expected_path
+    assert sc.terminal_checkpoint() == Checkpoint.STORED_GLOBAL.value
+
+
+def test_unknown_checkpoint_in_required_path_rejected():
+    with pytest.raises(Exception):
+        _base(required_path=["NOPE"])
+
+
+def test_suite_declares_required_paths():
+    for sc in get_suite(include_disabled=True):
+        assert sc.required_path, sc.id
+        assert sc.terminal_checkpoint() == sc.required_path[-1]
