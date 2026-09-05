@@ -20,10 +20,17 @@ import json
 import sys
 
 
-# Fingerprint абсолютно чистого состояния: пустые коллекции памяти.
+# Слои памяти, которые ДОЛЖНЫ быть пусты в чистом состоянии.
+_LAYERS = ("dialog", "episodic", "semantic", "policies", "working")
+
+# Fingerprint абсолютно чистого состояния: все слои по нулям.
 CLEAN_FINGERPRINT = "sha256:" + hashlib.sha256(
-    json.dumps({"user_facts": 0, "policies": 0}, sort_keys=True).encode()
+    json.dumps({k: 0 for k in _LAYERS}, sort_keys=True).encode()
 ).hexdigest()[:32]
+
+
+class ResetError(RuntimeError):
+    """Обязательная операция сброса не удалась — состояние нельзя считать чистым."""
 
 
 def _store():
@@ -31,9 +38,17 @@ def _store():
     return MongoMemoryStore()
 
 
-def full_reset() -> dict:
-    """Полный сброс памяти агента к дефолту репозитория (пустые коллекции + Redis)."""
+def _redis():
     from app.config import get_settings
+    import redis
+    return redis.from_url(get_settings().redis_url)
+
+
+def full_reset() -> dict:
+    """Полный сброс памяти к дефолту (пустые коллекции + Redis).
+
+    Ошибка ЛЮБОГО обязательного слоя — ResetError: молча продолжать нельзя, иначе
+    benchmark признает состояние чистым при уцелевшей рабочей памяти (ТЗ P0-3)."""
     m = _store()
     counts: dict = {}
     for name, col in [("dialog_sessions", m.dialog.col),
@@ -42,12 +57,10 @@ def full_reset() -> dict:
                       ("agent_policy_memories", m.agent_policy.col)]:
         counts[name] = col.delete_many({}).deleted_count
     try:
-        import redis
-        r = redis.from_url(get_settings().redis_url)
-        r.flushdb()
+        _redis().flushdb()
         counts["redis_working_memory"] = "flushed"
     except Exception as exc:  # noqa: BLE001
-        counts["redis_working_memory"] = f"error: {exc}"
+        raise ResetError(f"redis flush failed: {exc}") from exc
     return counts
 
 
@@ -59,17 +72,24 @@ def policy_only_reset() -> dict:
 
 
 def fingerprint(user_ids: list[str]) -> str:
-    """Хэш «состояния памяти» для проверки изоляции: число user-фактов + глоб. политик.
+    """Хэш состояния ВСЕХ слоёв памяти для проверки изоляции.
 
-    Чистое состояние = 0 user-фактов у наблюдаемых пользователей и 0 глобальных политик.
-    """
+    Учитывает dialog/episodic/semantic/agent_policy (Mongo) и working memory (Redis).
+    Если Redis недоступен — состояние НЕ считается чистым (возвращаем спец-значение),
+    чтобы уцелевшая рабочая память не прошла как чистая (ТЗ P0-3)."""
     m = _store()
-    policies = len(m.agent_policy.list_all(limit=500))
-    user_facts = 0
-    for uid in user_ids:
-        user_facts += len([s for s in m.semantic.list_for_context(uid, limit=200)
-                           if s.scope != "global"])
-    payload = json.dumps({"user_facts": user_facts, "policies": policies}, sort_keys=True)
+    counts = {
+        "dialog": m.dialog.col.count_documents({}),
+        "episodic": m.episodic.col.count_documents({}),
+        "semantic": m.semantic.col.count_documents({}),
+        "policies": m.agent_policy.col.count_documents({}),
+    }
+    try:
+        working = sum(1 for _ in _redis().scan_iter(match="working:*"))
+    except Exception:  # noqa: BLE001
+        return "sha256:REDIS_UNAVAILABLE"
+    counts["working"] = working
+    payload = json.dumps({k: counts.get(k, 0) for k in _LAYERS}, sort_keys=True)
     return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
