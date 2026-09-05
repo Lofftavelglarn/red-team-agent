@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.ipynb_checkpoints/
+
+# Логи прогонов: на каждый прогон своя подпапка с trace_*.json + report.* (локально, не в гит)
+runs/
+
+# Адаптеры под сторонние харнессы (PyRIT/promptfoo) — пока не используются
+adapters/
