@@ -22,7 +22,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 
-from redteam.models import CheckpointResult, RunResult, RunStatus
+from redteam.models import AttemptRecord, CheckpointResult, RunResult, RunStatus
 
 
 # 2.1: manifest несёт required_path/terminal_checkpoint, чекпоинт — matched/error.
@@ -95,6 +95,7 @@ class TraceWriter:
         self.events: list[Event] = []
         self._seq = 0
         self._checkpoints: dict[str, CheckpointResult] = {}
+        self._attempts: list[AttemptRecord] = []
         self.meta: dict = {}
         self.run_status: RunStatus = RunStatus.ABORTED
         os.makedirs(self.artifacts_dir, exist_ok=True)
@@ -146,11 +147,17 @@ class TraceWriter:
                    evaluator=result.evaluator, confidence=result.confidence,
                    error=error, matched=result.matched)
 
+    def set_attempts(self, attempts: list[AttemptRecord]) -> None:
+        """Записать попытки ДО сброса на диск: иначе result.json уходит с пустым
+        `attempts`, хотя attempts.jsonl заполнен."""
+        self._attempts = list(attempts)
+
     # --- сборка результата ---
     def build_result(self) -> RunResult:
         return RunResult(
             scenario_id=self.scenario_id, run_id=self.run_id,
-            status=self.run_status, checkpoints=dict(self._checkpoints), meta=dict(self.meta),
+            status=self.run_status, checkpoints=dict(self._checkpoints),
+            attempts=list(self._attempts), meta=dict(self.meta),
         )
 
     def _flush(self) -> None:

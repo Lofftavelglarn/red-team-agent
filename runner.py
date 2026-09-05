@@ -563,13 +563,14 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         else:
             tw.run_status = RunStatus.COMPLETED
 
-    result = tw.build_result()
-    result.attempts = [AttemptRecord(
-        iteration=i, turns=a["turns"], activation_probe=a["probe"], strategy_tags=a["tags"],
-        hypothesis=a["hyp"], deepest_checkpoint=a["deepest"], score=a["score"],
-        checkpoints=a["statuses"], target_calls=a["target_calls"],
-        attacker_calls=a["attacker_calls"]) for i, a in enumerate(attempts)]
-    return result
+        # попытки передаём в трассу ВНУТРИ контекста: _flush() пишет result.json на выходе
+        tw.set_attempts([AttemptRecord(
+            iteration=i, turns=a["turns"], activation_probe=a["probe"], strategy_tags=a["tags"],
+            hypothesis=a["hyp"], deepest_checkpoint=a["deepest"], score=a["score"],
+            checkpoints=a["statuses"], target_calls=a["target_calls"],
+            attacker_calls=a["attacker_calls"]) for i, a in enumerate(attempts)])
+
+    return tw.build_result()
 
 
 _STATUS_RANK = {"reached": 3, "not_reached": 2, "unobserved": 1,
