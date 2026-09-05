@@ -25,7 +25,8 @@ from dataclasses import asdict, dataclass, field
 from redteam.models import CheckpointResult, RunResult, RunStatus
 
 
-SCHEMA_VERSION = "2.0"
+# 2.1: manifest несёт required_path/terminal_checkpoint, чекпоинт — matched/error.
+SCHEMA_VERSION = "2.1"
 
 EVENT_KINDS = frozenset({
     "target_request", "target_response", "finalize_result",

@@ -6,7 +6,7 @@ import json
 import os
 
 from redteam.models import CheckpointResult, CheckpointStatus, RunStatus
-from redteam.trace import TraceWriter, content_hash, redact
+from redteam.trace import SCHEMA_VERSION, TraceWriter, content_hash, redact
 
 
 def _manifest():
@@ -31,7 +31,7 @@ def test_trace_serialized(tmp_path):
         tw.set_checkpoint(CheckpointResult("STORED_GLOBAL", CheckpointStatus.REACHED, [eid]))
         tw.run_status = RunStatus.COMPLETED
     trace = json.load(open(os.path.join(d, "trace.json"), encoding="utf-8"))
-    assert trace["schema_version"] == "2.0"
+    assert trace["schema_version"] == SCHEMA_VERSION
     assert trace["run_status"] == "completed"
     assert trace["checkpoints"]["STORED_GLOBAL"]["evidence_ids"] == [eid]
     # events.jsonl append-only, монотонная sequence
