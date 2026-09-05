@@ -73,9 +73,10 @@ class CheckpointResult:
     status: CheckpointStatus
     evidence_ids: list[str] = field(default_factory=list)
     reason: str = ""
-    evaluator: str = ""                    # deterministic | judge:<model> | infra
+    evaluator: str = ""                    # deterministic | judge | harness | infra
     confidence: float | None = None
     error: str | None = None
+    matched: list[str] = field(default_factory=list)   # найденные доказательства
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +87,7 @@ class CheckpointResult:
             "evaluator": self.evaluator,
             "confidence": self.confidence,
             "error": self.error,
+            "matched": list(self.matched),
         }
 
 

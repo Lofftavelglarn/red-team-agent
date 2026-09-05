@@ -46,6 +46,10 @@ def redact(text: str) -> str:
     if not text:
         return text
     t = re.sub(r"sk-genai-[A-Za-z0-9_\-]+", "sk-genai-<redacted>", text)
+    # ключи и заголовки авторизации из raw-исключений судьи/цели
+    t = re.sub(r"(?i)\b(authorization|api[-_]?key|x-api-key)\b\s*[:=]\s*\S+",
+               r"\1=<redacted>", t)
+    t = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", "sk-<redacted>", t)
     t = re.sub(r"\b\d{8,}\b", "<redacted-id>", t)
     return t
 
@@ -130,10 +134,17 @@ class TraceWriter:
 
     def set_checkpoint(self, result: CheckpointResult) -> None:
         self._checkpoints[result.name] = result
+        # error и matched обязаны попасть в событие: иначе evaluation_error в трассе
+        # невозможно диагностировать. Текст ошибки редактируется как и любой excerpt —
+        # ключи/заголовки в трассу не попадают.
+        error = result.error
+        if error and self.redact_report:
+            error = redact(error)
         self.event("checkpoint", "evaluator",
                    f"{result.name}={result.status.value}: {result.reason}",
                    status=result.status.value, evidence_ids=result.evidence_ids,
-                   evaluator=result.evaluator, confidence=result.confidence)
+                   evaluator=result.evaluator, confidence=result.confidence,
+                   error=error, matched=result.matched)
 
     # --- сборка результата ---
     def build_result(self) -> RunResult:

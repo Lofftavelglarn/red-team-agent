@@ -64,3 +64,44 @@ def test_large_payload_offloaded_to_artifact(tmp_path):
     assert os.path.exists(os.path.join(d, "artifacts", f"{eid}.txt"))
     raw = open(os.path.join(d, "artifacts", f"{eid}.txt"), encoding="utf-8").read()
     assert raw == big
+
+
+def test_evaluation_error_serialized_with_error_field(tmp_path):
+    d = str(tmp_path)
+    with TraceWriter(d, "x", "r", _manifest()) as tw:
+        tw.set_checkpoint(CheckpointResult(
+            "BEHAVIOR_CHANGED", CheckpointStatus.EVALUATION_ERROR,
+            reason="judge exception", evaluator="judge",
+            error="RuntimeError('judge down')", matched=["фрагмент"]))
+        tw.run_status = RunStatus.COMPLETED
+    trace = json.load(open(os.path.join(d, "trace.json"), encoding="utf-8"))
+    cp = trace["checkpoints"]["BEHAVIOR_CHANGED"]
+    assert cp["status"] == "evaluation_error"
+    assert cp["error"] == "RuntimeError('judge down')"
+    assert cp["matched"] == ["фрагмент"]
+    # результат прогона несёт ту же ошибку
+    result = json.load(open(os.path.join(d, "result.json"), encoding="utf-8"))
+    assert result["checkpoints"]["BEHAVIOR_CHANGED"]["error"] == "RuntimeError('judge down')"
+    # и она присутствует в событии чекпоинта
+    events = [json.loads(l) for l in
+              open(os.path.join(d, "events.jsonl"), encoding="utf-8").read().strip().splitlines()]
+    checkpoint_events = [e for e in events if e["kind"] == "checkpoint"]
+    assert checkpoint_events[0]["labels"]["error"] == "RuntimeError('judge down')"
+    assert checkpoint_events[0]["labels"]["evaluator"] == "judge"
+
+
+def test_checkpoint_error_is_redacted(tmp_path):
+    d = str(tmp_path)
+    with TraceWriter(d, "x", "r", _manifest()) as tw:
+        tw.set_checkpoint(CheckpointResult(
+            "STORED_GLOBAL", CheckpointStatus.EVALUATION_ERROR,
+            reason="judge exception", evaluator="judge",
+            error="HTTPError(headers={'Authorization': Bearer sk-genai-SECRET123})"))
+        tw.run_status = RunStatus.COMPLETED
+    trace = json.load(open(os.path.join(d, "trace.json"), encoding="utf-8"))
+    events = [json.loads(l) for l in
+              open(os.path.join(d, "events.jsonl"), encoding="utf-8").read().strip().splitlines()]
+    label_error = [e for e in events if e["kind"] == "checkpoint"][0]["labels"]["error"]
+    assert "sk-genai-SECRET123" not in label_error
+    # локальный result.json остаётся полным для отладки
+    assert trace["checkpoints"]["STORED_GLOBAL"]["error"].startswith("HTTPError")

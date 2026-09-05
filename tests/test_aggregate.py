@@ -11,13 +11,18 @@ from redteam.models import Checkpoint, CheckpointStatus, RunStatus
 CP = Checkpoint
 
 
+def _cp(name, value):
+    """Чекпоинт результата: значение — статус или (статус, evaluator)."""
+    status, evaluator = value if isinstance(value, tuple) else (value, "deterministic")
+    return {"name": name, "status": status, "evidence_ids": [], "reason": "",
+            "evaluator": evaluator, "confidence": None, "error": None}
+
+
 def _run(run_dir, rid, status, cps, meta=None):
     d = os.path.join(run_dir, rid)
     os.makedirs(d, exist_ok=True)
     result = {"scenario_id": "s", "run_id": rid, "status": status,
-              "checkpoints": {k: {"name": k, "status": v, "evidence_ids": [],
-                                  "reason": "", "evaluator": "", "confidence": None, "error": None}
-                              for k, v in cps.items()},
+              "checkpoints": {k: _cp(k, v) for k, v in cps.items()},
               "attempts": [], "meta": meta or {}}
     with open(os.path.join(d, "result.json"), "w", encoding="utf-8") as f:
         json.dump(result, f)
@@ -49,12 +54,31 @@ def test_infra_runs_excluded_and_counted(tmp_path):
     assert rep["rates"]["unsafe_output"]["observed"] == 1
 
 
-def test_judge_error_rate(tmp_path):
+def test_judge_error_rate_counts_only_judge_evaluations(tmp_path):
     rd = str(tmp_path)
     _run(rd, "r1", RunStatus.COMPLETED.value,
-         {CP.STORED_GLOBAL.value: "reached", CP.BEHAVIOR_CHANGED.value: "evaluation_error"})
+         {CP.STORED_GLOBAL.value: ("reached", "judge"),
+          CP.BEHAVIOR_CHANGED.value: ("evaluation_error", "judge"),
+          # знаменатель НЕ должен расти за счёт оценок вне судьи
+          CP.WRITE_ACCEPTED.value: ("reached", "deterministic"),
+          CP.RETRIEVAL_CANDIDATE.value: ("not_reached", "harness"),
+          CP.EXTERNAL_EFFECT.value: ("unobserved", "infra"),
+          CP.UNSAFE_OUTPUT.value: ("not_applicable", "harness")})
     rep = aggregate(rd)
-    assert rep["judge_error_rate"] is not None and rep["judge_error_rate"] > 0
+    assert rep["judge_evaluations"] == 2
+    assert rep["judge_errors"] == 1
+    assert rep["judge_error_rate"] == 0.5
+
+
+def test_judge_error_rate_is_none_without_judge_evaluations(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value,
+         {CP.STORED_GLOBAL.value: ("not_reached", "deterministic"),
+          CP.BEHAVIOR_CHANGED.value: ("evaluation_error", "harness")})
+    rep = aggregate(rd)
+    assert rep["judge_evaluations"] == 0
+    assert rep["judge_error_rate"] is None      # не 0.0: судья не оценивал ничего
+    assert rep["checkpoint_evaluation_errors"] == 1
 
 
 def test_false_positive_from_control(tmp_path):
