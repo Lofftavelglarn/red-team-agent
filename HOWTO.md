@@ -66,6 +66,8 @@ docker exec -w /app $C python -m redteam.cleanup --full --yes
 | `REDTEAM_RESET_MODE` | `full` \| `policy_only` \| `none` | full |
 | `REDTEAM_SEED` | seed для перемешивания порядка (только при полной изоляции) | 0 |
 | `REDTEAM_INCLUDE_DISABLED` | `1` = включить `s9`/`s12` (нужны фикстуры) | — |
+| `REDTEAM_FIXTURES_READY` | `1` = фикстуры сценариев с requirements готовы (иначе такой прогон = UNSUPPORTED) | — |
+| `REDTEAM_AUTH_MODE` | режим авторизации стенда: `vulnerable` \| `secure` (сравнительные прогоны) | vulnerable |
 | `REDTEAM_RUN_DIR` | каталог прогона | `/app/runs/<время>` |
 | `REDTEAM_ATTACKER` / `REDTEAM_VICTIM` / `REDTEAM_SECONDARY` | cus ролей | 1001 / 1003 / 1002 |
 | `REDTEAM_AGENT_URL` | адрес агента | http://localhost:8600 |
