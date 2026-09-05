@@ -27,6 +27,7 @@ import uuid
 from redteam.config import (
     ALLOW_FULL_RESET,
     CLEANUP_MODE,
+    KEEP_FINAL_STATE,
     MONGO_DB,
     OUT_DIR,
     RunConfig,
@@ -55,7 +56,6 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                  loop_iters: int = 0, seed: int = 0, fixtures_ready: bool = False,
                  admin=None, components=None) -> dict:
     from redteam.cleanup import CampaignScope, MemoryAdmin, restore
-    from redteam.runner import run_scenario
     from redteam.scenarios import by_id, get_suite
     from redteam.strategy import StrategyLibrary
 
@@ -69,6 +69,8 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                           user_ids=[cfg.attacker_user, cfg.victim_user, cfg.secondary_user],
                           started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     receipts: list[dict] = []
+    keep_final_state = KEEP_FINAL_STATE
+    baseline_fingerprint = admin.fingerprint()
 
     os.makedirs(run_dir, exist_ok=True)
     scenarios = [by_id(i) for i in scenario_ids] if scenario_ids \
@@ -83,8 +85,6 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                 max_attacker_calls=sc.budgets.max_attacker_calls,
                 timeout_s=sc.budgets.timeout_s,
                 no_improvement_patience=sc.budgets.no_improvement_patience)
-
-    user_ids = [cfg.attacker_user, cfg.victim_user, cfg.secondary_user]
 
     # Перемешивание порядка сценариев допустимо ТОЛЬКО при полной изоляции.
     order = list(scenarios)
@@ -103,24 +103,73 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
 
     results = []
     aborted = None
+    try:
+        results, aborted = _run_scenarios(
+            order, repeats, cfg, run_dir, _restore, _write_reset_error,
+            target, observer, adj, library, fixtures_ready, admin)
+    finally:
+        # Финальное восстановление обязано выполниться при любом исходе: успех, ошибка
+        # цели/судьи/атакующей модели, исключение в runner, Ctrl+C.
+        if keep_final_state:
+            print(f"  ВНИМАНИЕ: состояние кампании {cfg.campaign_id} оставлено "
+                  f"(REDTEAM_KEEP_FINAL_STATE=1)", flush=True)
+            receipts.append({"operation": "campaign_final_restore", "mode": "skipped",
+                             "campaign_id": cfg.campaign_id, "deleted": {},
+                             "errors": [], "restored": False,
+                             "kept_by_request": True})
+        else:
+            final = _restore("campaign_final_restore",
+                             expected_fingerprint=baseline_fingerprint)
+            if not final["restored"]:
+                print(f"  финальная очистка неполная: {final['errors']}", flush=True)
+
+    from redteam.aggregate import aggregate
+    report = aggregate(run_dir)
+    report["seed"] = seed
+    report["actual_order"] = actual_order
+    report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
+    report["cleanup"] = _cleanup_stats(summary, receipts, baseline_fingerprint,
+                                       keep_final_state)
+    report["aborted"] = bool(aborted)
+    if aborted:
+        report["abort_reason"] = {"operation": aborted["operation"],
+                                  "errors": aborted["errors"]}
+    import json
+    with open(os.path.join(run_dir, "campaign.json"), "w", encoding="utf-8") as f:
+        json.dump({"campaign_id": cfg.campaign_id, "seed": seed,
+                   "actual_order": actual_order, "repeats": repeats,
+                   "loop_iters": loop_iters, "cleanup": summary,
+                   "final_state_kept": bool(keep_final_state),
+                   "aborted": bool(aborted), "cleanup_receipts": receipts},
+                  f, ensure_ascii=False, indent=2)
+    return report
+
+
+def _run_scenarios(order, repeats, cfg, run_dir, restore_fn, write_reset_error,
+                   target, observer, adj, library, fixtures_ready, admin):
+    """Последовательный прогон сценариев. Возвращает (результаты, причина остановки)."""
+    from redteam.runner import run_scenario
+
+    results = []
+    aborted = None
     for sc in order:
         if aborted:
             break
         for k in range(repeats):
             # PRE-RUN восстановление: снимаем артефакты предыдущего сценария этой кампании.
-            pre = _restore("pre_scenario_restore", scenario_id=sc.id, repeat=k)
+            pre = restore_fn("pre_scenario_restore", scenario_id=sc.id, repeat=k)
             if not pre["restored"]:
                 # Обязательное восстановление не удалось. Продолжать нельзя: следующие
                 # прогоны уже не изолированы, а частичный сброс (Mongo очищен, Redis нет)
                 # выглядел бы как чистое состояние.
                 aborted = pre
-                results.append(_write_reset_error(run_dir, sc, cfg, k, pre))
+                results.append(write_reset_error(run_dir, sc, cfg, k, pre))
                 print(f"  ОСТАНОВКА: восстановление не удалось: {pre['errors']}", flush=True)
                 break
             tag = f"{sc.id}" + (f" #{k+1}/{repeats}" if repeats > 1 else "")
             print(f"=== {tag} (loop={sc.budgets.max_iterations}) ===", flush=True)
             reset_fn = (lambda sid=sc.id, rep=k:
-                        _restore("pre_candidate_restore", scenario_id=sid, repeat=rep))
+                        restore_fn("pre_candidate_restore", scenario_id=sid, repeat=rep))
             fp_fn = admin.fingerprint
             try:
                 res = run_scenario(
@@ -137,24 +186,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                                      "BEHAVIOR_CHANGED", "UNSAFE_OUTPUT"))
             print(f"  status={res.status.value} e2e={res.meta.get('end_to_end_reached')} | {line}", flush=True)
 
-    from redteam.aggregate import aggregate
-    report = aggregate(run_dir)
-    report["seed"] = seed
-    report["actual_order"] = actual_order
-    report["n_completed"] = sum(1 for r in results if r.status == RunStatus.COMPLETED)
-    report["cleanup"] = _cleanup_stats(summary, receipts)
-    report["aborted"] = bool(aborted)
-    if aborted:
-        report["abort_reason"] = {"operation": aborted["operation"],
-                                  "errors": aborted["errors"]}
-    import json
-    with open(os.path.join(run_dir, "campaign.json"), "w", encoding="utf-8") as f:
-        json.dump({"campaign_id": cfg.campaign_id, "seed": seed,
-                   "actual_order": actual_order, "repeats": repeats,
-                   "loop_iters": loop_iters, "cleanup": summary,
-                   "aborted": bool(aborted), "cleanup_receipts": receipts},
-                  f, ensure_ascii=False, indent=2)
-    return report
+    return results, aborted
 
 
 def _write_reset_error(run_dir: str, scenario, cfg: RunConfig, repeat: int,
@@ -179,19 +211,23 @@ def _write_reset_error(run_dir: str, scenario, cfg: RunConfig, repeat: int,
     return result
 
 
-def _cleanup_stats(summary: dict, receipts: list[dict]) -> dict:
+def _cleanup_stats(summary: dict, receipts: list[dict], baseline_fingerprint: str,
+                   keep_final_state: bool) -> dict:
     """Сводка по всем операциям очистки кампании (без credentials)."""
     deleted: dict = {}
     for receipt in receipts:
         for name, count in (receipt.get("deleted") or {}).items():
             if isinstance(count, int):
                 deleted[name] = deleted.get(name, 0) + count
+    final = receipts[-1] if receipts else {}
     return {"mode": summary["cleanup_mode"],
             "operations": len(receipts),
             "failed_operations": sum(1 for r in receipts if r.get("errors")),
             "records_deleted": deleted,
-            "initial_fingerprint": receipts[0].get("fingerprint_before") if receipts else None,
-            "final_fingerprint": receipts[-1].get("fingerprint_after") if receipts else None}
+            "initial_fingerprint": baseline_fingerprint,
+            "final_fingerprint": final.get("fingerprint_after"),
+            "baseline_restored": bool(final.get("fingerprint_after") == baseline_fingerprint),
+            "final_state_kept": bool(keep_final_state)}
 
 
 def main(argv: list[str]) -> None:

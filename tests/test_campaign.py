@@ -195,3 +195,60 @@ def test_campaign_stops_all_remaining_scenarios_after_reset_failure(tmp_path):
     report, _, _, _ = _run(tmp_path, admin=admin, scenarios=scenarios)
     assert report["n_runs"] == 1                   # второй сценарий не запускался
     assert report["aborted"] is True
+
+
+def test_final_cleanup_restores_baseline_after_success(tmp_path):
+    report, admin, db, redis = _run(tmp_path)
+    cleanup = report["cleanup"]
+    assert cleanup["baseline_restored"] is True
+    assert cleanup["final_fingerprint"] == cleanup["initial_fingerprint"]
+    receipts = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))
+    assert receipts["cleanup_receipts"][-1]["operation"] == "campaign_final_restore"
+    # состояние стенда вернулось к исходному: остались только sentinel-записи
+    assert db["agent_policy_memories"].count_documents({}) == 1
+    assert list(redis.store) == [f"working:9999:{FOREIGN_SESSION}"]
+
+
+def test_final_cleanup_runs_after_exception(tmp_path):
+    class Boom(FakeStand):
+        def chat(self, *a, **kw):
+            raise KeyboardInterrupt("прервано пользователем")
+
+    db, redis = _sentinels()
+    admin = MemoryAdmin(db, redis)
+    stand = Boom()
+    # артефакт кампании, который обязана убрать финальная очистка
+    db["agent_policy_memories"].insert_one(
+        {"policy_id": "p-ours", "statement": "мусор атаки",
+         "source_session_id": session_prefix(CAMPAIGN) + "s1-0-candidate-0"})
+    import redteam.scenarios as scenarios_module
+    original = scenarios_module.get_suite
+    scenarios_module.get_suite = lambda include_disabled=False: [_scenario()]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_campaign([], 1, _cfg(), str(tmp_path), admin=admin,
+                         components=(stand, FakeObserver(stand),
+                                     Adjudicator(judge=lambda p: JudgeVerdict("not_reached"))))
+    finally:
+        scenarios_module.get_suite = original
+    # исключение не отменило восстановление стенда
+    assert db["agent_policy_memories"].count_documents({}) == 1
+    assert db["agent_policy_memories"].docs[0]["policy_id"] == "p-foreign"
+
+
+def test_keep_final_state_is_opt_in_and_reported(tmp_path, monkeypatch):
+    import redteam.campaign as campaign_module
+
+    # по умолчанию выключено: состояние оставляется только по явному запросу
+    assert campaign_module.KEEP_FINAL_STATE is False
+    monkeypatch.setattr(campaign_module, "KEEP_FINAL_STATE", True)
+    report, _, db, _ = _run(tmp_path)
+    assert report["cleanup"]["final_state_kept"] is True
+    saved = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))
+    assert saved["final_state_kept"] is True
+    final = saved["cleanup_receipts"][-1]
+    assert final["operation"] == "campaign_final_restore"
+    assert final["mode"] == "skipped" and final["kept_by_request"] is True
+    assert final["deleted"] == {}          # состояние намеренно не тронуто
+    # чужие записи по-прежнему целы даже в отладочном режиме
+    assert db["agent_policy_memories"].count_documents({}) == 1
