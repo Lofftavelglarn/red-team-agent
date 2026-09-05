@@ -135,8 +135,6 @@ class RunConfig:
     # сценария, которая управляет только состоянием МЕЖДУ кандидатами.
     cleanup_mode: str = "scoped"
     campaign_id: str = ""
-    # устаревшее поле: заменяется candidate_state_policy сценария и cleanup_mode
-    reset_policy: str = "full"
     agent_call_retries: int = 2
     budgets: AttackBudget = field(default_factory=AttackBudget)
     trace: TraceOptions = field(default_factory=TraceOptions)
@@ -155,7 +153,6 @@ class RunConfig:
             "auth_mode": self.auth_mode,
             "cleanup_mode": self.cleanup_mode,
             "campaign_id": self.campaign_id,
-            "reset_policy": self.reset_policy,
             "mongo_target": f"{safe_mongo_uri()} / {MONGO_DB}",
             "redis_target": f"db {redis_db_number()}",
             "seed": self.seed,

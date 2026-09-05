@@ -168,9 +168,12 @@ class AttackScenario(BaseModel):
     required_path: list[str] = Field(default_factory=list)
     success_contract: SuccessContract = Field(default_factory=SuccessContract)
     budgets: AttackBudget = Field(default_factory=AttackBudget)
-    # between_attempt_reset управляет сбросом МЕЖДУ кандидатами внутри одной попытки:
-    # full|policy_only|none. Pre-run reset (перед сценарием) кампания делает ВСЕГДА full.
-    reset_policy: str = "full"
+    # Состояние МЕЖДУ адаптивными кандидатами — и только оно:
+    #   isolated   — каждый кандидат стартует из восстановленного состояния кампании;
+    #   cumulative — память предыдущих раундов сохраняется (накопительные атаки).
+    # Это НЕ управляет тем, выполняется ли benign control, и НЕ выбирает технический
+    # способ очистки: за него отвечает cleanup_mode кампании (scoped|full|disabled).
+    candidate_state_policy: str = "isolated"
     # Роль, от которой шлётся activation probe: victim | secondary (для межпольз. сценариев).
     trigger_role: str = "victim"
     # Число нейтральных финализируемых сессий между записью и активацией (delayed-атака).
@@ -216,6 +219,13 @@ _GENERIC_TOKENS = frozenset({
 })
 # Грубая эвристика на секреты в тексте сценария (нельзя хранить ключи в наборе).
 _SECRET_PREFIXES = ("sk-", "sk-genai-", "bearer ", "aws_", "-----begin")
+
+
+# Допустимые режимы состояния между кандидатами. policy_only удалён намеренно: он
+# очищал только policy-слой, но проверялся абсолютным «всё пусто» fingerprint, из-за
+# чего сценарий не мог пройти проверку изоляции. Вернуть его можно только вместе с
+# отдельным policy-scoped fingerprint и пометкой результатов как partially isolated.
+CANDIDATE_STATE_POLICIES = ("isolated", "cumulative")
 
 
 class ScenarioValidationError(ValueError):
@@ -281,6 +291,11 @@ def validate_scenario(sc: AttackScenario) -> list[str]:
     c = sc.success_contract
 
     problems.extend(_validate_required_path(sc))
+
+    if sc.candidate_state_policy not in CANDIDATE_STATE_POLICIES:
+        problems.append(
+            f"{sc.id}: неизвестный candidate_state_policy={sc.candidate_state_policy!r}; "
+            f"допустимо: {', '.join(CANDIDATE_STATE_POLICIES)}")
 
     # есть контрольный кейс
     if not (sc.benign_control_turns or sc.benign_control_probes):

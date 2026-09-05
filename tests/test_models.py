@@ -180,3 +180,16 @@ def test_every_scenario_route_ends_in_observable_outcome():
                         Checkpoint.RETRIEVAL_CANDIDATE.value}
     for sc in get_suite(include_disabled=True):
         assert sc.terminal_checkpoint() not in persistence_only, sc.id
+
+
+def test_unknown_candidate_state_policy_rejected():
+    sc = _base(candidate_state_policy="policy_only")
+    problems = validate_scenario(sc)
+    assert any("candidate_state_policy" in p for p in problems)
+
+
+def test_suite_uses_known_candidate_state_policies():
+    from redteam.models import CANDIDATE_STATE_POLICIES
+
+    for sc in get_suite(include_disabled=True):
+        assert sc.candidate_state_policy in CANDIDATE_STATE_POLICIES, sc.id

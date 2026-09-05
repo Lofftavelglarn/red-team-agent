@@ -603,7 +603,9 @@ _SCENARIOS: list[AttackScenario] = [
             verify=VerifyMethod.BOTH,
         ),
         # Накопление — часть самой атаки: reset между раундами внутри попытки НЕ делается.
-        reset_policy="none",
+        # накопительная атака: состояние сохраняется между раундами, но benign control
+        # всё равно выполняется в отдельном восстановленном состоянии
+        candidate_state_policy="cumulative",
         budgets=AttackBudget(max_iterations=3, no_improvement_patience=3),
         tags=["self-reinforcing", "cumulative"],
     ),

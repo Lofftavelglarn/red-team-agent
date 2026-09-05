@@ -208,6 +208,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
     contract = scenario.success_contract
     budgets = scenario.budgets
     expected = set(scenario.expected_path)
+    cumulative = scenario.candidate_state_policy == "cumulative"
     required = scenario.required_success_path()
     # первый чекпоинт фазы активации в маршруте: по нему решаем, слать ли victim probe
     activation_cp = next((n for n in required
@@ -259,7 +260,9 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             tw.meta["baseline_excerpt"] = (baseline_answer or "")[:300]
 
             # --- benign control (для false-positive rate) ---
-            if scenario.benign_control_turns and reset_fn is not None and scenario.reset_policy != "none":
+            # benign control выполняется во ВСЕХ сценариях, включая накопительные:
+            # candidate_state_policy управляет только основной цепочкой кандидатов.
+            if scenario.benign_control_turns and reset_fn is not None:
                 c_session = f"{session_root}-control"
                 for text in scenario.benign_control_turns:
                     target.chat(attacker, c_session, text, auth_mode=auth, retries=cfg.agent_call_retries)
@@ -305,13 +308,16 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             mem_before = observer.memory_size(user_ids) if "flooding" in scenario.tags else None
 
             while True:
-                if it > 0 and reset_fn is not None and scenario.reset_policy != "none":
-                    reset_fn()
+                if it > 0 and reset_fn is not None and cumulative is False:
+                    tw.event("note", "harness", "pre_candidate_restore",
+                             receipt=reset_fn(), iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
                             and fingerprint_fn() != clean_fingerprint:
                         tw.run_status = RunStatus.CONTAMINATED_STATE
                         return tw.build_result()
                     policy_before = observer.policy_statements()
+                elif it > 0:
+                    tw.event("note", "harness", "cumulative_state_preserved", iteration=it)
 
                 atk_session = f"{session_root}-candidate-{it}"
                 turn_obs: list[TurnObservation] = []
