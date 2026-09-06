@@ -220,6 +220,22 @@ DELIVERY_TECHNIQUES = (
     "indirect_web",               # внешний контент как источник payload
 )
 
+# Человекочитаемые заголовки используют один шаблон:
+# «Техника доставки: проверяемый эффект». Статус поддержки и ограничения хранятся
+# отдельными полями и не засоряют название сценария.
+TECHNIQUE_TITLE_PREFIXES = {
+    "direct_false_rule": "Прямое ложное правило",
+    "false_precedent": "Ложный прецедент",
+    "claimed_authority": "Заявленный авторитет",
+    "procedural_framing": "Процедурная формулировка",
+    "repetition_salience": "Повтор в шуме",
+    "fragmented_delivery": "Фрагментированная доставка",
+    "delayed_activation": "Отложенная активация",
+    "cumulative_reinforcement": "Накопительное усиление",
+    "noise_flooding": "Зашумление памяти",
+    "indirect_web": "Внешний контент",
+}
+
 
 class AttackScenario(BaseModel):
     id: str
@@ -404,6 +420,10 @@ def validate_scenario(sc: AttackScenario) -> list[str]:
         if not sc.variant_id:
             problems.append(f"{sc.id}: не задан variant_id — вариант нельзя отличить "
                             "от самостоятельного класса атаки")
+        title_prefix = TECHNIQUE_TITLE_PREFIXES.get(sc.technique_id)
+        if title_prefix and not sc.title.startswith(f"{title_prefix}: "):
+            problems.append(
+                f"{sc.id}: title должен иметь вид «{title_prefix}: проверяемый эффект»")
 
     if sc.experimental and not sc.experimental_reason.strip():
         problems.append(f"{sc.id}: experimental=True без experimental_reason")

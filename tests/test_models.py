@@ -254,6 +254,14 @@ def test_suite_scenarios_are_classified():
     assert any(s.calibration for s in suite)
 
 
+def test_suite_titles_follow_delivery_technique_template():
+    from redteam.models import TECHNIQUE_TITLE_PREFIXES
+
+    for sc in get_suite(include_disabled=True):
+        assert sc.title.startswith(f"{TECHNIQUE_TITLE_PREFIXES[sc.technique_id]}: "), sc.id
+        assert "(" not in sc.title, sc.id
+
+
 def test_unknown_family_rejected():
     sc = _base(family_id="not-a-family", technique_id="direct_false_rule", variant_id="v")
     assert any("family_id" in p for p in validate_scenario(sc))
