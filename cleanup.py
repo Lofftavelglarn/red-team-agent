@@ -24,7 +24,9 @@ Scoped-очистка опирается на реальные поля схем
 | Redis working memory    | ключ `working:<user_id>:<session_id>`          |
 
 Все идентификаторы сессий кампании начинаются с `rt-<campaign_id>-`, поэтому одна
-кампания никогда не удаляет артефакты другой.
+кампания никогда не удаляет артефакты другой. Условие держится на алфавите
+`campaign_id` (`[A-Za-z0-9_]{4,32}`, см. `validate_campaign_id`): без дефисов префиксы
+не вкладываются друг в друга, без метасимволов запрос не расширяется на чужие данные.
 
   python -m redteam.cleanup                  # показать agent_policy
   python -m redteam.cleanup --yes            # удалить все agent_policy
@@ -77,9 +79,27 @@ class UnsafeResetError(ResetError):
     """Запрошено разрушительное действие без явного подтверждения."""
 
 
+# Идентификатор кампании подставляется в имена сессий, в Mongo-regex и в Redis-glob,
+# поэтому его алфавит ограничен. Метасимвол расширил бы scoped-очистку на чужие данные
+# (`campaign_id="*"` удалил бы рабочую память ВСЕХ rt-кампаний), а дефис сделал бы
+# префиксы вложенными: кампания `abc` считала бы своими артефакты кампании `abc-other`.
+_CAMPAIGN_ID_RE = re.compile(r"^[A-Za-z0-9_]{4,32}$")
+
+
+def validate_campaign_id(campaign_id: str) -> str:
+    """Проверить идентификатор кампании до любых операций над памятью стенда."""
+    text = str(campaign_id or "")
+    if not _CAMPAIGN_ID_RE.match(text):
+        raise ValueError(
+            f"недопустимый campaign_id {campaign_id!r}: разрешены буквы, цифры и "
+            "подчёркивание, длина 4-32. Дефисы и подстановочные знаки запрещены — "
+            "они расширяют scoped-очистку на артефакты других кампаний.")
+    return text
+
+
 def session_prefix(campaign_id: str) -> str:
     """Префикс всех идентификаторов сессий кампании."""
-    return f"rt-{campaign_id}-"
+    return f"rt-{validate_campaign_id(campaign_id)}-"
 
 
 @dataclass
@@ -89,6 +109,10 @@ class CampaignScope:
     campaign_id: str
     user_ids: list[str] = field(default_factory=list)
     started_at: str = ""       # ISO-8601 UTC; ограничивает удаление user-фактов
+
+    def __post_init__(self) -> None:
+        # Ни одна операция очистки не должна получить scope с непроверенным идентификатором.
+        validate_campaign_id(self.campaign_id)
 
     @property
     def prefix(self) -> str:

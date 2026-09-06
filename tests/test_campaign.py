@@ -291,6 +291,17 @@ def test_unsupported_scenario_does_not_block_others(tmp_path):
     assert any("s2" in session for _, session, _ in stand.chat_log)
 
 
+def test_wildcard_campaign_id_stops_campaign_before_cleanup(tmp_path):
+    """`campaign_id` попадает в Redis-glob: подстановочный знак удалил бы чужие ключи."""
+    db, redis = _sentinels()
+    admin = MemoryAdmin(db, redis)
+    cfg = RunConfig(cleanup_mode="scoped", campaign_id="*")
+    with pytest.raises(RuntimeError, match="campaign_id"):
+        run_campaign([], 1, cfg, str(tmp_path), admin=admin, components=_components())
+    assert db["dialog_sessions"].count_documents({}) == 1
+    assert f"working:9999:{FOREIGN_SESSION}" in redis.store
+
+
 def test_unreachable_stores_stop_campaign_before_cleanup(tmp_path):
     db, _ = _sentinels()
     admin = MemoryAdmin(db, FakeRedis(fail=True))

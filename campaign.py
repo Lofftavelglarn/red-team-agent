@@ -55,10 +55,16 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
                  run_dir: str, include_disabled: bool = False,
                  loop_iters: int = 0, seed: int = 0, fixtures_ready: bool = False,
                  admin=None, components=None) -> dict:
-    from redteam.cleanup import CampaignScope, MemoryAdmin, restore
+    from redteam.cleanup import CampaignScope, MemoryAdmin, restore, validate_campaign_id
     from redteam.scenarios import by_id, get_suite
     from redteam.strategy import StrategyLibrary
 
+    # Идентификатор кампании попадает в Mongo-regex и Redis-glob scoped-очистки, поэтому
+    # проверяется первым: подстановочный знак удалил бы артефакты чужих кампаний.
+    try:
+        validate_campaign_id(cfg.campaign_id)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     # Режим очистки проверяется ДО любых обращений к хранилищам: full без второго
     # подтверждения не должен доходить до удаления данных.
     mode = resolve_cleanup_mode(cfg.cleanup_mode)

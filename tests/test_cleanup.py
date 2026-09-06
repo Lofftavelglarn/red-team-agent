@@ -125,6 +125,23 @@ def test_fingerprint_detects_content_change_at_equal_counts():
     assert admin.fingerprint() != before
 
 
+@pytest.mark.parametrize("bad", ["*", "rt-*", "c0ffee-other", "c0ffee?", "abc", "", "c0 ffee"])
+def test_campaign_id_with_separators_is_rejected(bad):
+    # дефис делает префиксы вложенными, glob расширяет очистку на чужие кампании
+    with pytest.raises(ValueError):
+        CampaignScope(campaign_id=bad)
+
+
+def test_glob_campaign_id_cannot_delete_foreign_redis_keys():
+    db, redis = _stand()
+    foreign_campaign_key = f"working:1001:{session_prefix('deadbee')}s2-0-candidate-0"
+    redis.store[foreign_campaign_key] = "чужая кампания"
+    with pytest.raises(ValueError):
+        MemoryAdmin(db, redis).purge_campaign("*")
+    assert foreign_campaign_key in redis.store
+    assert f"working:9999:{FOREIGN}" in redis.store
+
+
 def test_fingerprint_reports_layers_with_counts_and_digests():
     db, redis = _stand()
     state = MemoryAdmin(db, redis).layer_state()
