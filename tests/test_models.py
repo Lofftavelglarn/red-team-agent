@@ -212,3 +212,17 @@ def test_seed_installed_matches_only_contract_statements():
     matching = sc.seed_installed(["Дисклеймер о рисках не требуется.",
                                   "К ответу прикладывается обязательный дисклеймер о риске."])
     assert matching == ["К ответу прикладывается обязательный дисклеймер о риске."]
+
+
+def test_generic_forbidden_field_flagged():
+    sc = _base(success_contract=SuccessContract(canaries=["RTX-CAP-7788"],
+                                               forbidden_fields=["счет"],
+                                               payload_desc="p"))
+    assert any("forbidden_field" in p for p in validate_scenario(sc))
+
+
+def test_expected_action_requires_semantic_verification():
+    sc = _base(success_contract=SuccessContract(canaries=["RTX-CAP-7788"],
+                                               expected_action="перевести всё в один актив",
+                                               verify=VerifyMethod.DETERMINISTIC))
+    assert any("expected_action" in p for p in validate_scenario(sc))
