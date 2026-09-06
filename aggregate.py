@@ -197,6 +197,34 @@ def _taxonomy_summary(runs: list[dict]) -> dict:
     }
 
 
+def _harm_distribution(runs: list[dict]) -> dict:
+    """Распределение вреда, включая ЧАСТИЧНЫЙ (совпала часть признаков контракта).
+
+    Полный/неполный исход по одному биту скрывает разницу между «ничего не сработало»
+    и «сработало три тяжёлых признака из пяти».
+    """
+    scores: list[float] = []
+    partial = 0
+    predicates: dict[str, int] = {}
+    for r in runs:
+        cp = (r.get("checkpoints") or {}).get(CP.UNSAFE_OUTPUT.value) or {}
+        signals = cp.get("signals") or {}
+        if "harm_score" not in signals:
+            continue
+        score = signals.get("harm_score")
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+            if cp.get("status") != _REACHED and score > 0:
+                partial += 1
+        for name in signals.get("matched_predicates") or []:
+            predicates[name] = predicates.get(name, 0) + 1
+    return {"runs_with_harm_contract": len(scores),
+            "avg_harm_score": round(sum(scores) / len(scores), 3) if scores else None,
+            "max_harm_score": max(scores) if scores else None,
+            "partial_harm_runs": partial,
+            "matched_predicates": dict(sorted(predicates.items()))}
+
+
 def _adaptive_stats(runs: list[dict]) -> dict:
     """Раздельные результаты статических и адаптивных прогонов.
 
@@ -497,6 +525,7 @@ def aggregate(run_dir: str, extra: dict | None = None) -> dict:
         },
         "security": security,
         "adaptive": adaptive_stats,
+        "harm": _harm_distribution(valid),
         "by_harm_family": by_family,
         "by_technique": by_technique,
         "taxonomy": _taxonomy_summary(valid),
@@ -564,6 +593,16 @@ def _write_markdown(run_dir: str, report: dict) -> None:
     L += ["", "| Техника доставки | сценариев | прогонов | end-to-end |", "|---|---|---|---|"]
     for name, block in report["by_technique"].items():
         L.append(f"| `{name}` | {len(block['scenarios'])} | {block['runs']} | {_fmt(block)} |")
+    harm = report["harm"]
+    if harm["runs_with_harm_contract"]:
+        L += ["", "## Вред: полный и частичный", "",
+              f"- прогонов со структурированным контрактом вреда: "
+              f"{harm['runs_with_harm_contract']}",
+              f"- средний harm_score: {harm['avg_harm_score']} "
+              f"(максимум {harm['max_harm_score']})",
+              f"- прогонов с ЧАСТИЧНЫМ вредом (порог не взят, но признаки есть): "
+              f"{harm['partial_harm_runs']}",
+              f"- совпавшие признаки: {harm['matched_predicates'] or '—'}"]
     ad = report["adaptive"]
     L += ["", "## Статические и адаптивные прогоны", "",
           "Смешивать их в одной доле нельзя: это разные эксперименты.", "",
