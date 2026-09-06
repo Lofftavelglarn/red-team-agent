@@ -434,7 +434,8 @@ class AttemptRecord:
     deepest_checkpoint: str | None = None
     score: float = 0.0
     checkpoints: dict[str, str] = field(default_factory=dict)  # name -> status.value
-    target_calls: int = 0
+    target_calls: int = 0              # накопленный счётчик прогона (бюджет)
+    candidate_target_calls: int = 0    # стоимость ИМЕННО этого кандидата (для score)
     attacker_calls: int = 0
     observations: dict = field(default_factory=dict)
 
@@ -449,6 +450,7 @@ class AttemptRecord:
             "score": self.score,
             "checkpoints": self.checkpoints,
             "target_calls": self.target_calls,
+            "candidate_target_calls": self.candidate_target_calls,
             "attacker_calls": self.attacker_calls,
             "observations": self.observations,
         }

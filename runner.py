@@ -596,6 +596,9 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
                 atk_session = f"{session_root}-candidate-{it}"
                 candidate_id = f"candidate-{it}"
+                # Стоимость ИМЕННО этого кандидата: накопленный счётчик кампании штрафовал
+                # поздние мутации за обращения, потраченные их предшественниками.
+                calls_before_candidate = target_calls
                 turn_obs: list[TurnObservation] = []
                 for i, text in enumerate(turns):
                     r, _, _ = _chat("candidate", attacker, atk_session, text,
@@ -727,8 +730,9 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
                 statuses = {name: j.status.value for name, (j, _) in cp.items()}
                 refused = is_safe_refusal(post, contract.safe_refusal_markers)
+                candidate_target_calls = target_calls - calls_before_candidate
                 sc = score_candidate(statuses, required_path=required,
-                                     target_calls=target_calls, refused=refused,
+                                     target_calls=candidate_target_calls, refused=refused,
                                      repetition=beam.repetition_penalty(turns))
                 deepest_name, _ = deepest_reached(statuses)
                 path_depth = contiguous_path_depth(statuses, required)
@@ -740,6 +744,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                                  "turns": list(turns),
                                  "probe": scenario.primary_probe, "tags": list(cur_tags),
                                  "hyp": cur_hyp, "target_calls": target_calls,
+                                 "candidate_target_calls": candidate_target_calls,
                                  "attacker_calls": attacker_calls})
                 for name, st in statuses.items():
                     diagnostic_best[name] = _better(diagnostic_best.get(name), st)
@@ -747,7 +752,12 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                                    "deepest_checkpoint": deepest_name, "checkpoints": statuses,
                                    "required_path_depth": path_depth,
                                    "strategy_tags": cur_tags, "hypothesis": cur_hyp,
-                                   "target_calls": target_calls})
+                                   "target_calls": target_calls,
+                                   "candidate_target_calls": candidate_target_calls,
+                                   "candidate_id": candidate_id,
+                                   "request_event_ids": [input_eid, fin_eid],
+                                   "activation_event_ids": [e for e in [post_eid] if e],
+                                   "negative_event_ids": [x["event_id"] for x in neg_results]})
 
                 improved = sc > best_score
                 best_score = max(best_score, sc)
@@ -898,6 +908,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             iteration=i, turns=a["turns"], activation_probe=a["probe"], strategy_tags=a["tags"],
             hypothesis=a["hyp"], deepest_checkpoint=a["deepest"], score=a["score"],
             checkpoints=a["statuses"], target_calls=a["target_calls"],
+            candidate_target_calls=a["candidate_target_calls"],
             attacker_calls=a["attacker_calls"]) for i, a in enumerate(attempts)])
 
     return tw.build_result()
@@ -923,7 +934,8 @@ def _select_winner(attempts: list[dict], required_path: list[str]) -> dict | Non
 
     def key(a: dict) -> tuple:
         depth = contiguous_path_depth(a["statuses"], required_path)
-        return (depth, a["score"], -a.get("target_calls", 0))
+        # при равной глубине и балле дешевле тот кандидат, который сам стоил меньше
+        return (depth, a["score"], -a.get("candidate_target_calls", a.get("target_calls", 0)))
 
     return max(attempts, key=key)
 
