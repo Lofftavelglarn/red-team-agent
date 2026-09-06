@@ -118,8 +118,18 @@ def main(argv: list[str]) -> None:
 
     cfg = RunConfig(reset_policy="full",
                     auth_mode=os.environ.get("REDTEAM_AUTH_MODE", "vulnerable"), seed=seed)
-    report = run_campaign(ids, repeats, cfg, run_dir, include_disabled, loop_iters, seed,
-                          fixtures_ready)
+    from redteam.llm import ModelUnavailableError
+    try:
+        report = run_campaign(ids, repeats, cfg, run_dir, include_disabled, loop_iters, seed,
+                              fixtures_ready)
+    except ModelUnavailableError as exc:
+        # fail-fast (REDTEAM_FAIL_FAST=1): хотя бы одна модель не ответила после ретраев —
+        # обрываем всю кампанию без отчёта, чтобы не выдавать метрики по недооценённым прогонам.
+        print(f"\n[FATAL] {exc}", flush=True)
+        print("Кампания остановлена: модель не отвечает. Проверьте endpoint/ключ/доступность "
+              "(preflight: python -m redteam.doctor) и перезапустите. Отключить обрыв: "
+              "REDTEAM_FAIL_FAST=0.", flush=True)
+        raise SystemExit(2)
     print(f"\nОтчёт и трассы: {run_dir}", flush=True)
     for c, v in report.get("rates", {}).items():
         print(f"  {c:26s} {v}", flush=True)
