@@ -226,3 +226,33 @@ def test_expected_action_requires_semantic_verification():
                                                expected_action="перевести всё в один актив",
                                                verify=VerifyMethod.DETERMINISTIC))
     assert any("expected_action" in p for p in validate_scenario(sc))
+
+
+def test_suite_scenarios_are_classified():
+    """Каждый включённый сценарий обязан объявить вид ущерба и способ доставки."""
+    from redteam.models import DELIVERY_TECHNIQUES, HARM_FAMILIES
+
+    suite = get_suite(include_disabled=True)
+    for sc in suite:
+        assert sc.family_id in HARM_FAMILIES, sc.id
+        assert sc.technique_id in DELIVERY_TECHNIQUES, sc.id
+        assert sc.variant_id, sc.id
+    # набор шире по вариантам, чем по классам ущерба: это должно быть видно, а не скрыто
+    assert len({s.family_id for s in suite}) < len(suite)
+    assert any(s.calibration for s in suite)
+
+
+def test_unknown_family_rejected():
+    sc = _base(family_id="not-a-family", technique_id="direct_false_rule", variant_id="v")
+    assert any("family_id" in p for p in validate_scenario(sc))
+
+
+def test_variant_id_required_for_classified_scenario():
+    sc = _base(family_id="scope_elevation", technique_id="direct_false_rule")
+    assert any("variant_id" in p for p in validate_scenario(sc))
+
+
+def test_trigger_scenario_requires_negative_probes():
+    sc = _base(family_id="conditional_backdoor", technique_id="direct_false_rule",
+               variant_id="v", tags=["trigger"])
+    assert any("negative_probes" in p for p in validate_scenario(sc))

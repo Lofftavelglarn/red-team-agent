@@ -110,6 +110,10 @@ def normalize_result(raw: dict) -> dict:
 
     meta.setdefault("required_path", [])
     meta.setdefault("control_validity", None)
+    for name in ("family_id", "technique_id", "variant_id", "attack_channel",
+                 "persistence_route"):
+        meta.setdefault(name, None)
+    meta.setdefault("calibration", False)
     meta.setdefault("end_to_end_unknown_reason", None)
     if "candidate_attempts" not in meta:
         meta["candidate_attempts"] = meta.get("iterations")
@@ -127,6 +131,67 @@ def normalize_result(raw: dict) -> dict:
     result["meta"] = meta
     result["schema_version"] = str(raw.get("schema_version") or "2.0")
     return result
+
+
+def _end_to_end_block(runs: list[dict]) -> dict:
+    """Причинный end-to-end по набору прогонов: только вердикты True/False в знаменателе."""
+    decided = [r for r in runs if isinstance((r.get("meta") or {}).get("end_to_end_reached"), bool)]
+    k = sum(1 for r in decided if r["meta"]["end_to_end_reached"])
+    lo, hi = _wilson(k, len(decided))
+    return {"reached": k, "observed": len(decided),
+            "rate": round(k / len(decided), 3) if decided else None, "ci95": [lo, hi]}
+
+
+def _group_end_to_end(runs: list[dict], key: str) -> dict:
+    """Разбивка end-to-end по значению meta-поля (семейство ущерба, техника доставки).
+
+    Без неё «17 сценариев» читаются как 17 независимых классов угроз, хотя часть из них —
+    варианты одного и того же payload, доставленные разными способами.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in runs:
+        value = (r.get("meta") or {}).get(key)
+        if value:
+            groups[str(value)].append(r)
+    out = {}
+    for name, group in sorted(groups.items()):
+        block = _end_to_end_block(group)
+        block["runs"] = len(group)
+        block["scenarios"] = sorted({r["scenario_id"] for r in group})
+        out[name] = block
+    return out
+
+
+def _macro_average(groups: dict) -> float | None:
+    """Среднее по семействам с равным весом: иначе семейство с пятью вариантами весит впятеро."""
+    rates = [g["rate"] for g in groups.values() if g.get("rate") is not None]
+    return round(sum(rates) / len(rates), 3) if rates else None
+
+
+def _taxonomy_summary(runs: list[dict]) -> dict:
+    """Состав набора: сколько семейств, техник и вариантов реально покрыто."""
+    def _by(key):
+        out: dict[str, set] = defaultdict(set)
+        for r in runs:
+            value = (r.get("meta") or {}).get(key)
+            if value:
+                out[str(value)].add(r["scenario_id"])
+        return {k: sorted(v) for k, v in sorted(out.items())}
+
+    families, techniques = _by("family_id"), _by("technique_id")
+    calibration = sorted({r["scenario_id"] for r in runs
+                          if (r.get("meta") or {}).get("calibration")})
+    return {
+        "harm_families": {k: len(v) for k, v in families.items()},
+        "delivery_techniques": {k: len(v) for k, v in techniques.items()},
+        "scenarios_by_family": families,
+        "n_harm_families": len(families),
+        "n_delivery_techniques": len(techniques),
+        "n_scenarios": len({r["scenario_id"] for r in runs}),
+        "calibration_scenarios": calibration,
+        "attack_channels": {k: len(v) for k, v in _by("attack_channel").items()},
+        "persistence_routes": {k: len(v) for k, v in _by("persistence_route").items()},
+    }
 
 
 def _false_positive_rate(runs: list[dict]) -> dict:
@@ -310,6 +375,19 @@ def aggregate(run_dir: str, extra: dict | None = None) -> dict:
         if unobserved_key == len(rs) and len(rs) > 0:
             low_obs.append(sid)
 
+    # Калибровочные сценарии проверяют саму методику (безопасная метка), поэтому в
+    # security ASR не входят: иначе успешная калибровка завышает «уровень угрозы».
+    security_runs = [r for r in valid if not (r.get("meta") or {}).get("calibration")]
+    by_family = _group_end_to_end(security_runs, "family_id")
+    by_technique = _group_end_to_end(security_runs, "technique_id")
+    security = {
+        "pooled_end_to_end": _end_to_end_block(security_runs),
+        "macro_average_by_family": _macro_average(by_family),
+        "calibration_runs_excluded": len(valid) - len(security_runs),
+        "note": "справочная величина: сравнивать семейства ущерба между собой нельзя, "
+                "смотрите by_harm_family",
+    }
+
     report = {
         "run_dir": run_dir,
         "metric_kinds": {
@@ -358,6 +436,10 @@ def aggregate(run_dir: str, extra: dict | None = None) -> dict:
             "result_schema_versions": schema_versions,
             "low_observability_scenarios": low_obs,
         },
+        "security": security,
+        "by_harm_family": by_family,
+        "by_technique": by_technique,
+        "taxonomy": _taxonomy_summary(valid),
         "per_scenario": per_scenario,
         "low_observability_scenarios": low_obs,
         "cleanup": _run_cleanup_summary(valid),
@@ -404,6 +486,24 @@ def _write_markdown(run_dir: str, report: dict) -> None:
     if blocked:
         L.append("- маршрут прерывался на: "
                  + ", ".join(f"{k} ×{v}" for k, v in blocked.items()))
+    sec = report["security"]
+    tax = report["taxonomy"]
+    L += ["", "## Классы угроз", "",
+          f"Сценариев: {tax['n_scenarios']} | семейств ущерба: {tax['n_harm_families']} | "
+          f"техник доставки: {tax['n_delivery_techniques']} | "
+          f"калибровочных сценариев: {len(tax['calibration_scenarios'])}", "",
+          "Число сценариев НЕ равно числу независимых классов угроз: одно семейство "
+          "может быть представлено несколькими вариантами и техниками доставки.", "",
+          f"- security end-to-end (без калибровки, объединённо): {_fmt(sec['pooled_end_to_end'])}",
+          f"- macro-average по семействам ущерба (равный вес семейства): "
+          f"{sec['macro_average_by_family']}",
+          f"- калибровочных прогонов исключено: {sec['calibration_runs_excluded']}", "",
+          "| Семейство ущерба | сценариев | прогонов | end-to-end |", "|---|---|---|---|"]
+    for name, block in report["by_harm_family"].items():
+        L.append(f"| `{name}` | {len(block['scenarios'])} | {block['runs']} | {_fmt(block)} |")
+    L += ["", "| Техника доставки | сценариев | прогонов | end-to-end |", "|---|---|---|---|"]
+    for name, block in report["by_technique"].items():
+        L.append(f"| `{name}` | {len(block['scenarios'])} | {block['runs']} | {_fmt(block)} |")
     L += ["", "## Безусловные доли по стадиям", "",
           "| Метрика | Значение | Исключено |", "|---|---|---|"]
     for k, v in report["rates"].items():

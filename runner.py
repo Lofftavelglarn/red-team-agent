@@ -882,6 +882,14 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                                     winner["tags"], terminal)
 
         tw.meta["diagnostic_best"] = diagnostic_best
+        # Классификация прогона: агрегатор считает ASR по семействам ущерба и техникам,
+        # а не по числу сценариев — иначе варианты одного payload выглядят как разные угрозы.
+        tw.meta["family_id"] = scenario.family_id
+        tw.meta["technique_id"] = scenario.technique_id
+        tw.meta["variant_id"] = scenario.variant_id
+        tw.meta["calibration"] = bool(scenario.calibration)
+        tw.meta["attack_channel"] = scenario.attack_channel
+        tw.meta["persistence_route"] = scenario.persistence_route
         tw.meta["required_path"] = required
         tw.meta["terminal_checkpoint"] = terminal
         # bool — доказанный исход, None — маршрут оборвался на ненаблюдаемом чекпоинте
