@@ -6,7 +6,8 @@ import json
 import os
 
 from redteam.models import CheckpointResult, CheckpointStatus, RunStatus
-from redteam.trace import SCHEMA_VERSION, TraceWriter, content_hash, redact, validate_run
+from redteam.trace import (SCHEMA_VERSION, TraceWriter, content_hash, redact,
+                           sanitize_secrets, validate_run)
 
 
 def _manifest():
@@ -22,6 +23,16 @@ def test_redaction_hides_key_and_long_id():
     out = redact("ключ sk-genai-ABC123 счёт 10678901")
     assert "sk-genai-ABC123" not in out
     assert "10678901" not in out
+
+
+def test_recursive_secret_sanitizer_covers_headers_env_and_uri():
+    secret = "SENTINEL-DO-NOT-WRITE"
+    value = {
+        "headers": {"Authorization": f"Bearer {secret}"},
+        "nested": [f"ATTACKER_API_KEY={secret}", f"redis://user:{secret}@redis:6379"],
+        "password": secret,
+    }
+    assert secret not in json.dumps(sanitize_secrets(value), ensure_ascii=False)
 
 
 def test_trace_serialized(tmp_path):
@@ -103,8 +114,25 @@ def test_checkpoint_error_is_redacted(tmp_path):
               open(os.path.join(d, "events.jsonl"), encoding="utf-8").read().strip().splitlines()]
     label_error = [e for e in events if e["kind"] == "checkpoint"][0]["labels"]["error"]
     assert "sk-genai-SECRET123" not in label_error
-    # локальный result.json остаётся полным для отладки
-    assert trace["checkpoints"]["STORED_GLOBAL"]["error"].startswith("HTTPError")
+    # Credentials удаляются из всех сериализованных представлений, не только event.
+    assert "SECRET123" not in trace["checkpoints"]["STORED_GLOBAL"]["error"]
+    result = json.load(open(os.path.join(d, "result.json"), encoding="utf-8"))
+    assert "SECRET123" not in json.dumps(result)
+
+
+def test_secret_never_reaches_any_trace_file_or_nested_label(tmp_path):
+    d = str(tmp_path)
+    secret = "SENTINEL-DO-NOT-WRITE"
+    manifest = {"config": {"api_key": secret}, "note": f"API_KEY={secret}"}
+    with TraceWriter(d, "x", "r", manifest, redact_report=False) as tw:
+        tw.meta["headers"] = {"Authorization": f"Bearer {secret}"}
+        tw.event("note", "harness", f"Bearer {secret}", nested={"password": secret})
+        tw.append_attempt({"request": {"x-api-key": secret}})
+        tw.run_status = RunStatus.COMPLETED
+    for root, _dirs, files in os.walk(d):
+        for name in files:
+            text = open(os.path.join(root, name), encoding="utf-8").read()
+            assert secret not in text, os.path.join(root, name)
 
 
 def _run_dir_with_trace(tmp_path):

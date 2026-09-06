@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 
@@ -51,19 +52,59 @@ def content_hash(text: str) -> str:
 
 # Credentials — единственное, что не сохраняется НИГДЕ, включая raw-артефакт.
 def redact_secrets(text: str) -> str:
-    import re
     if not text:
         return text
     t = re.sub(r"sk-genai-[A-Za-z0-9_\-]+", "sk-genai-<redacted>", text)
-    # ключи и заголовки авторизации из raw-исключений судьи/цели
-    t = re.sub(r"(?i)\b(authorization|api[-_]?key|x-api-key)\b\s*[:=]\s*\S+",
-               r"\1=<redacted>", t)
+    t = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]+",
+               r"\1 <redacted>", t)
+    # Значения заголовков и переменных встречаются и как env (`API_KEY=x`), и как
+    # repr словаря (`'Authorization': 'Bearer x'`). Кавычки вокруг имени/значения
+    # не должны мешать редакции.
+    t = re.sub(
+        r"(?i)(['\"]?(?:authorization|proxy-authorization|x-api-key|"
+        r"api[-_]?key|access[-_]?token|client[-_]?secret|password)['\"]?\s*[:=]\s*)"
+        r"(['\"]?)[^'\"\s,}\]]+\2",
+        r"\1\2<redacted>\2", t,
+    )
+    # Credentials в URI (MongoDB/Redis/HTTP proxy и т.п.).
+    t = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@",
+               r"\1<redacted>@", t)
     return re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", "sk-<redacted>", t)
+
+
+_SECRET_FIELD = re.compile(
+    r"(?i)^(?:authorization|proxy_authorization|x[-_]?api[-_]?key|api[-_]?key|"
+    r"access[-_]?token|refresh[-_]?token|client[-_]?secret|password|credentials?)$"
+)
+
+
+def sanitize_secrets(value, *, report_redaction: bool = False):
+    """Рекурсивно удалить credentials из любого сериализуемого значения.
+
+    Трасса содержит не только `excerpt`: произвольные данные приходят через labels,
+    manifest, meta, checkpoints и attempts. Поэтому строковой regex только в event
+    content не является границей безопасности.
+    """
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            safe_key = redact_secrets(key) if isinstance(key, str) else key
+            if isinstance(key, str) and _SECRET_FIELD.fullmatch(key):
+                clean[safe_key] = "<redacted>" if item not in (None, "") else item
+            else:
+                clean[safe_key] = sanitize_secrets(item, report_redaction=report_redaction)
+        return clean
+    if isinstance(value, list):
+        return [sanitize_secrets(v, report_redaction=report_redaction) for v in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_secrets(v, report_redaction=report_redaction) for v in value)
+    if isinstance(value, str):
+        return redact(value) if report_redaction else redact_secrets(value)
+    return value
 
 
 # Редакция отчётной выжимки: credentials + длинные идентификаторы (ПДн стенда).
 def redact(text: str) -> str:
-    import re
     if not text:
         return text
     return re.sub(r"\b\d{8,}\b", "<redacted-id>", redact_secrets(text))
@@ -152,10 +193,12 @@ class TraceWriter:
         truncated = len(text) > self.artifact_threshold
         # Артефакт нужен не только длинному тексту: если редакция изменила выжимку,
         # без него исходное содержимое события нельзя восстановить вообще.
-        if self.store_raw and (truncated or (self.redact_report and redact(text) != text)):
+        safe_text = redact_secrets(text)
+        report_text = redact(text) if self.redact_report else safe_text
+        if self.store_raw and (truncated or report_text != text):
             raw_artifact = os.path.join("artifacts", "raw", f"{eid}.txt")
             with open(os.path.join(self.run_dir, raw_artifact), "w", encoding="utf-8") as f:
-                f.write(redact_secrets(text))
+                f.write(safe_text)
         if truncated:
             excerpt = text[: self.artifact_threshold] + " …[truncated]"
         ev = Event(
@@ -163,8 +206,9 @@ class TraceWriter:
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
             kind=kind, actor=actor, session_id=session_id, source=source, sink=sink,
             content_hash=content_hash(text),
-            excerpt=redact(excerpt) if self.redact_report else excerpt,
-            raw_artifact=raw_artifact, labels=labels,
+            excerpt=redact(excerpt) if self.redact_report else redact_secrets(excerpt),
+            raw_artifact=raw_artifact,
+            labels=sanitize_secrets(labels, report_redaction=self.redact_report),
             previous_event_hash=self._chain,
         )
         ev.event_hash = event_hash(ev.to_dict())
@@ -214,7 +258,7 @@ class TraceWriter:
         self.manifest["last_event_hash"] = self.events[-1].event_hash if self.events else None
         self.manifest["events_sha256"] = "sha256:" + self._events_digest.hexdigest()
         with open(os.path.join(self.run_dir, "manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(self.manifest, f, ensure_ascii=False, indent=2)
+            json.dump(sanitize_secrets(self.manifest), f, ensure_ascii=False, indent=2)
         trace = {
             "schema_version": SCHEMA_VERSION,
             "scenario_id": self.scenario_id,
@@ -225,14 +269,14 @@ class TraceWriter:
             "events": [e.to_dict() for e in self.events],
         }
         with open(os.path.join(self.run_dir, "trace.json"), "w", encoding="utf-8") as f:
-            json.dump(trace, f, ensure_ascii=False, indent=2)
+            json.dump(sanitize_secrets(trace), f, ensure_ascii=False, indent=2)
         # attempts.jsonl пишется отдельно (append) через append_attempt.
         with open(os.path.join(self.run_dir, "result.json"), "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(sanitize_secrets(result.to_dict()), f, ensure_ascii=False, indent=2)
 
     def append_attempt(self, attempt_dict: dict) -> None:
         with open(os.path.join(self.run_dir, "attempts.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(attempt_dict, ensure_ascii=False) + "\n")
+            f.write(json.dumps(sanitize_secrets(attempt_dict), ensure_ascii=False) + "\n")
 
     # --- контекст-менеджер: гарантированное сохранение трассы ---
     def __enter__(self) -> "TraceWriter":
