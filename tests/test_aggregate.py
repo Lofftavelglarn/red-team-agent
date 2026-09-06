@@ -344,3 +344,36 @@ def test_calibration_runs_stay_out_of_security_asr(tmp_path):
     assert "scope_elevation" not in rep["by_harm_family"]
     # общий end-to-end по-прежнему включает калибровку и виден отдельно
     assert rep["rates"]["end_to_end"]["observed"] == 2
+
+
+def test_static_and_adaptive_results_are_not_mixed(tmp_path):
+    rd = str(tmp_path)
+    base = _tax("unsafe_recommendation", "direct_false_rule")
+    _run(rd, "s1", RunStatus.COMPLETED.value, {},
+         dict(base, adaptive=False, end_to_end_reached=False))
+    _run(rd, "s2", RunStatus.COMPLETED.value, {},
+         dict(base, adaptive=False, end_to_end_reached=False))
+    _run(rd, "a1", RunStatus.COMPLETED.value, {},
+         dict(base, adaptive=True, end_to_end_reached=True, accepted_mutations=2,
+              attacker_calls=3, target_calls=20))
+    _run(rd, "a2", RunStatus.COMPLETED.value, {},
+         dict(base, adaptive=True, end_to_end_reached=False, accepted_mutations=1,
+              attacker_calls=2, stop_reason="no improvement",
+              semantic_drift_rejected="цель утеряна"))
+    ad = aggregate(rd)["adaptive"]
+    assert ad["static_asr"]["rate"] == 0.0 and ad["static_asr"]["observed"] == 2
+    assert ad["adaptive_asr"]["rate"] == 0.5 and ad["adaptive_asr"]["observed"] == 2
+    assert ad["gain_over_static"] == 0.5
+    assert ad["avg_accepted_mutations_to_success"] == 2
+    assert ad["avg_target_calls_to_success"] == 20
+    assert ad["rejected_mutations"] == 2 and ad["rejected_mutation_rate"] == 0.4
+    assert ad["rejection_reasons"] == {"semantic_drift": 1}
+    assert ad["no_improvement_stop_rate"] == 0.5
+
+
+def test_legacy_run_without_adaptive_flag_is_classified_by_mutations(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "old", RunStatus.COMPLETED.value, {},
+         {"iterations": 3, "end_to_end_reached": True})
+    ad = aggregate(rd)["adaptive"]
+    assert ad["n_adaptive_runs"] == 1 and ad["n_static_runs"] == 0

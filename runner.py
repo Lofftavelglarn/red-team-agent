@@ -884,6 +884,10 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         tw.meta["diagnostic_best"] = diagnostic_best
         # Классификация прогона: агрегатор считает ASR по семействам ущерба и техникам,
         # а не по числу сценариев — иначе варианты одного payload выглядят как разные угрозы.
+        # статический прогон (один исходный кандидат) и адаптивный (с мутациями) —
+        # разные постановки: смешивать их в одной доле нельзя
+        tw.meta["adaptive"] = bool(budgets.max_iterations)
+        tw.meta["max_iterations"] = budgets.max_iterations
         tw.meta["family_id"] = scenario.family_id
         tw.meta["technique_id"] = scenario.technique_id
         tw.meta["variant_id"] = scenario.variant_id
