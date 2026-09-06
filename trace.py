@@ -1,7 +1,9 @@
 """Trace schema v2: доказательная, append-only трасса прогона.
 
 Отличия от v1:
-- события (`Event`) — append-only поток с монотонной `sequence` и `content_hash`;
+- события (`Event`) — append-only поток с монотонной `sequence`, `content_hash` и
+  hash-цепочкой (`previous_event_hash`/`event_hash`): удаление или перестановка строки
+  events.jsonl обнаруживается `python -m redteam.trace validate <run-dir>`;
 - чекпоинты (`CheckpointResult`) ссылаются на `event_id`, а не копируют текст;
 - крупные payload'ы выносятся в `artifacts/`, в событии остаётся excerpt + hash;
 - чувствительные данные редактируются в отчёте, но доступны в локальном raw artifact;
@@ -25,8 +27,10 @@ from dataclasses import asdict, dataclass, field
 from redteam.models import AttemptRecord, CheckpointResult, RunResult, RunStatus
 
 
-# 2.1: manifest несёт required_path/terminal_checkpoint, чекпоинт — matched/error.
-SCHEMA_VERSION = "2.1"
+# 2.2: события связаны hash-цепочкой, manifest несёт её границы и хеш events.jsonl.
+SCHEMA_VERSION = "2.2"
+# Версия схемы, начиная с которой в трассе есть hash-цепочка.
+CHAIN_SINCE = "2.2"
 
 EVENT_KINDS = frozenset({
     "target_request", "target_response", "finalize_result",
@@ -68,9 +72,21 @@ class Event:
     excerpt: str = ""
     raw_artifact: str | None = None
     labels: dict = field(default_factory=dict)
+    previous_event_hash: str = ""
+    event_hash: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def canonical(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def event_hash(payload: dict) -> str:
+    """Хеш события БЕЗ поля event_hash — над ним и строится цепочка."""
+    body = {k: v for k, v in payload.items() if k != "event_hash"}
+    return "sha256:" + hashlib.sha256(canonical(body).encode("utf-8")).hexdigest()
 
 
 class TraceWriter:
@@ -99,6 +115,10 @@ class TraceWriter:
         self.meta: dict = {}
         self.run_status: RunStatus = RunStatus.ABORTED
         self.closed = False
+        # Цепочка целостности: каждое событие ссылается на хеш предыдущего, поэтому
+        # удалённая или переставленная строка events.jsonl перестаёт сходиться.
+        self._chain = ""
+        self._events_digest = hashlib.sha256()
         os.makedirs(self.artifacts_dir, exist_ok=True)
         self._events_fp = open(os.path.join(run_dir, "events.jsonl"), "a", encoding="utf-8")
 
@@ -128,9 +148,14 @@ class TraceWriter:
             content_hash=content_hash(text),
             excerpt=redact(excerpt) if self.redact_report else excerpt,
             raw_artifact=raw_artifact, labels=labels,
+            previous_event_hash=self._chain,
         )
+        ev.event_hash = event_hash(ev.to_dict())
+        self._chain = ev.event_hash
         self.events.append(ev)
-        self._events_fp.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
+        line = json.dumps(ev.to_dict(), ensure_ascii=False) + "\n"
+        self._events_digest.update(line.encode("utf-8"))
+        self._events_fp.write(line)
         self._events_fp.flush()
         return eid
 
@@ -165,6 +190,12 @@ class TraceWriter:
         result = self.build_result()
         self.manifest["run_status"] = self.run_status.value
         self.manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Границы цепочки и хеш файла событий: по ним validate проверяет, что трассу
+        # не усекли и не переписали после прогона.
+        self.manifest["event_count"] = len(self.events)
+        self.manifest["first_event_hash"] = self.events[0].event_hash if self.events else None
+        self.manifest["last_event_hash"] = self.events[-1].event_hash if self.events else None
+        self.manifest["events_sha256"] = "sha256:" + self._events_digest.hexdigest()
         with open(os.path.join(self.run_dir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(self.manifest, f, ensure_ascii=False, indent=2)
         trace = {
@@ -206,3 +237,133 @@ class TraceWriter:
             self._events_fp.close()
             self.closed = True
         return False  # исключения не подавляем
+
+
+# --- проверка целостности трассы ---
+def _read_jsonl(path: str) -> list[dict]:
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def validate_run(run_dir: str) -> dict:
+    """Проверить целостность и согласованность трассы одного прогона.
+
+    Возвращает {"ok": bool, "problems": [...], "checked": {...}}. Проверяется то, что
+    отчёт обязан гарантировать: события не переставлены и не удалены, ссылки чекпоинтов
+    ведут на существующие события, артефакты на месте, а manifest/result/trace говорят
+    об одном и том же прогоне. Трассы схемы < 2.2 не содержат цепочки — для них она
+    не проверяется, но остальные проверки выполняются.
+    """
+    problems: list[str] = []
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    events_path = os.path.join(run_dir, "events.jsonl")
+    if not os.path.exists(manifest_path):
+        return {"ok": False, "problems": [f"{run_dir}: нет manifest.json"], "checked": {}}
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    events = _read_jsonl(events_path) if os.path.exists(events_path) else []
+    if not events:
+        problems.append("events.jsonl пуст или отсутствует")
+
+    version = str(manifest.get("schema_version", "2.0"))
+    has_chain = version >= CHAIN_SINCE
+
+    seen: set[str] = set()
+    previous = ""
+    for i, ev in enumerate(events, start=1):
+        if ev.get("sequence") != i:
+            problems.append(f"событие {ev.get('event_id')}: sequence={ev.get('sequence')}, ожидалось {i}")
+        eid = ev.get("event_id")
+        if eid in seen:
+            problems.append(f"повторяющийся event_id: {eid}")
+        seen.add(eid)
+        if has_chain:
+            if ev.get("previous_event_hash", "") != previous:
+                problems.append(f"{eid}: разрыв цепочки (previous_event_hash)")
+            if ev.get("event_hash") != event_hash(ev):
+                problems.append(f"{eid}: event_hash не совпадает с содержимым")
+            previous = ev.get("event_hash", "")
+        artifact = ev.get("raw_artifact")
+        if artifact and not os.path.exists(os.path.join(run_dir, artifact)):
+            problems.append(f"{eid}: артефакт {artifact} отсутствует")
+
+    if has_chain:
+        if manifest.get("event_count") not in (None, len(events)):
+            problems.append(f"manifest.event_count={manifest.get('event_count')}, "
+                            f"в events.jsonl {len(events)}")
+        if events and manifest.get("last_event_hash") not in (None, events[-1].get("event_hash")):
+            problems.append("manifest.last_event_hash не совпадает с последним событием")
+        if events and manifest.get("first_event_hash") not in (None, events[0].get("event_hash")):
+            problems.append("manifest.first_event_hash не совпадает с первым событием")
+
+    result_path = os.path.join(run_dir, "result.json")
+    result = None
+    if os.path.exists(result_path):
+        with open(result_path, encoding="utf-8") as f:
+            result = json.load(f)
+        if result.get("run_id") != manifest.get("run_id"):
+            problems.append("run_id в result.json и manifest.json различаются")
+        if manifest.get("run_status") and result.get("status") != manifest.get("run_status"):
+            problems.append("run_status в result.json и manifest.json различаются")
+        for name, cp in (result.get("checkpoints") or {}).items():
+            missing = [e for e in (cp.get("evidence_ids") or []) if e not in seen]
+            if missing:
+                problems.append(f"чекпоинт {name} ссылается на несуществующие события: {missing}")
+    else:
+        problems.append("нет result.json")
+
+    trace_path = os.path.join(run_dir, "trace.json")
+    if os.path.exists(trace_path) and result is not None:
+        with open(trace_path, encoding="utf-8") as f:
+            trace = json.load(f)
+        if trace.get("run_id") != result.get("run_id"):
+            problems.append("run_id в trace.json и result.json различаются")
+        if len(trace.get("events") or []) != len(events):
+            problems.append("число событий в trace.json и events.jsonl различается")
+        if set(trace.get("checkpoints") or {}) != set(result.get("checkpoints") or {}):
+            problems.append("наборы чекпоинтов в trace.json и result.json различаются")
+
+    return {"ok": not problems, "problems": problems,
+            "checked": {"run_dir": run_dir, "events": len(events),
+                        "schema_version": version, "hash_chain": has_chain}}
+
+
+def validate_campaign(run_dir: str) -> dict:
+    """Проверить все прогоны кампании (подкаталоги с manifest.json)."""
+    reports = {}
+    for entry in sorted(os.listdir(run_dir)):
+        sub = os.path.join(run_dir, entry)
+        if os.path.isdir(sub) and os.path.exists(os.path.join(sub, "manifest.json")):
+            reports[entry] = validate_run(sub)
+    failed = {k: v for k, v in reports.items() if not v["ok"]}
+    return {"ok": not failed, "runs": len(reports), "failed": len(failed), "reports": reports}
+
+
+def main(argv: list[str]) -> None:
+    if not argv or argv[0] != "validate" or len(argv) < 2:
+        print("использование: python -m redteam.trace validate <run-dir>")
+        raise SystemExit(2)
+    target = argv[1]
+    report = (validate_run(target) if os.path.exists(os.path.join(target, "manifest.json"))
+              else validate_campaign(target))
+    if "reports" in report:
+        for name, rep in report["reports"].items():
+            mark = "ok" if rep["ok"] else "ОШИБКИ"
+            print(f"  {name}: {mark} (событий {rep['checked'].get('events')})")
+            for problem in rep["problems"]:
+                print(f"    - {problem}")
+        print(f"прогонов: {report['runs']}, с проблемами: {report['failed']}")
+    else:
+        for problem in report["problems"]:
+            print(f"  - {problem}")
+        print("трасса цела" if report["ok"] else "трасса НЕ прошла проверку")
+    raise SystemExit(0 if report["ok"] else 1)
+
+
+if __name__ == "__main__":
+    import sys
+    main(sys.argv[1:])

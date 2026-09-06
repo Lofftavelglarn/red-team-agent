@@ -6,7 +6,7 @@ import json
 import os
 
 from redteam.models import CheckpointResult, CheckpointStatus, RunStatus
-from redteam.trace import SCHEMA_VERSION, TraceWriter, content_hash, redact
+from redteam.trace import SCHEMA_VERSION, TraceWriter, content_hash, redact, validate_run
 
 
 def _manifest():
@@ -105,3 +105,83 @@ def test_checkpoint_error_is_redacted(tmp_path):
     assert "sk-genai-SECRET123" not in label_error
     # локальный result.json остаётся полным для отладки
     assert trace["checkpoints"]["STORED_GLOBAL"]["error"].startswith("HTTPError")
+
+
+def _run_dir_with_trace(tmp_path):
+    manifest = {"scenario_id": "s1"}
+    with TraceWriter(str(tmp_path), "s1", "r1", manifest) as tw:
+        a = tw.event("target_request", "attacker", "первая реплика", session_id="sess")
+        tw.event("target_response", "attacker", "ответ", session_id="sess",
+                 parent_event_ids=[a])
+        tw.set_checkpoint(CheckpointResult(name="INPUT_DELIVERED",
+                                           status=CheckpointStatus.REACHED,
+                                           evidence_ids=[a]))
+        tw.run_status = RunStatus.COMPLETED
+    return str(tmp_path)
+
+
+def test_events_are_hash_chained(tmp_path):
+    run_dir = _run_dir_with_trace(tmp_path)
+    rows = [json.loads(line) for line in
+            open(os.path.join(run_dir, "events.jsonl"), encoding="utf-8") if line.strip()]
+    assert rows[0]["previous_event_hash"] == ""
+    for prev, cur in zip(rows, rows[1:]):
+        assert cur["previous_event_hash"] == prev["event_hash"]
+    manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+    assert manifest["event_count"] == len(rows)
+    assert manifest["last_event_hash"] == rows[-1]["event_hash"]
+    assert manifest["events_sha256"].startswith("sha256:")
+
+
+def test_validate_accepts_intact_trace(tmp_path):
+    report = validate_run(_run_dir_with_trace(tmp_path))
+    assert report["ok"], report["problems"]
+    assert report["checked"]["hash_chain"] is True
+
+
+def test_validate_detects_deleted_event(tmp_path):
+    run_dir = _run_dir_with_trace(tmp_path)
+    path = os.path.join(run_dir, "events.jsonl")
+    rows = [line for line in open(path, encoding="utf-8") if line.strip()]
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(rows[:1] + rows[2:])      # вырезали второе событие
+    report = validate_run(run_dir)
+    assert not report["ok"]
+    assert any("цепочки" in p or "sequence" in p for p in report["problems"])
+
+
+def test_validate_detects_edited_event(tmp_path):
+    run_dir = _run_dir_with_trace(tmp_path)
+    path = os.path.join(run_dir, "events.jsonl")
+    rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+    rows[0]["excerpt"] = "подменённый текст"
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    report = validate_run(run_dir)
+    assert not report["ok"]
+    assert any("event_hash" in p for p in report["problems"])
+
+
+def test_validate_detects_missing_artifact(tmp_path):
+    run_dir = str(tmp_path)
+    with TraceWriter(run_dir, "s1", "r2", {}, artifact_threshold=10) as tw:
+        tw.event("note", "harness", "очень длинный текст события для выноса в артефакт")
+        tw.run_status = RunStatus.COMPLETED
+    artifacts = os.listdir(os.path.join(run_dir, "artifacts"))
+    os.remove(os.path.join(run_dir, "artifacts", artifacts[0]))
+    report = validate_run(run_dir)
+    assert not report["ok"]
+    assert any("артефакт" in p for p in report["problems"])
+
+
+def test_validate_detects_checkpoint_pointing_nowhere(tmp_path):
+    run_dir = _run_dir_with_trace(tmp_path)
+    path = os.path.join(run_dir, "result.json")
+    result = json.load(open(path, encoding="utf-8"))
+    result["checkpoints"]["INPUT_DELIVERED"]["evidence_ids"] = ["evt-does-not-exist"]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False)
+    report = validate_run(run_dir)
+    assert not report["ok"]
+    assert any("несуществующие события" in p for p in report["problems"])
