@@ -1069,3 +1069,24 @@ def test_candidate_cost_is_per_candidate_not_cumulative(tmp_path):
     # (позже включается отдельный штраф за дословный повтор реплик)
     scores = [a.score for a in res.attempts]
     assert scores[0] == scores[1]
+
+
+def test_attacker_probe_is_ignored_and_recorded(tmp_path):
+    """Probe задан сценарием: иначе кандидаты сравнивались бы с разными baseline."""
+    canary = "CANARY-7600"
+    stand = FakeStand(extractor=_make_extractor(canary))
+    scn = _scn(canary=canary, iters=1)
+
+    def gen(scenario, feedback, hints):
+        return AttackCandidate(turns=[f"ещё раз про {canary}"],
+                               activation_probe="совершенно другой вопрос",
+                               preserved_objective=True)
+
+    res = _run(stand, scn=scn, cfg=_cfg(1), tmp=str(tmp_path), attacker_gen=gen)
+    assert res.meta["activation_probe_policy"] == "fixed_by_scenario"
+    notes = [e for e in _events(tmp_path, res)
+             if e["kind"] == "note" and "activation_probe_ignored" in e["excerpt"]]
+    assert notes and notes[0]["labels"]["used"] == scn.primary_probe
+    # все probe'ы жертвы шли с исходным текстом сценария
+    victim_texts = {row[2] for row in stand.chat_log if "-victim" in row[1]}
+    assert victim_texts == {scn.primary_probe}

@@ -801,6 +801,13 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                           "stop_reason": cand.stop_reason},
                          phase="candidate", candidate_id=f"candidate-{it}", iteration=it,
                          parent_event_ids=[post_eid] if post_eid else [])
+                if cand.activation_probe and cand.activation_probe != scenario.primary_probe:
+                    # probe фиксирован сценарием: иначе кандидаты сравнивались бы с разными
+                    # baseline и между собой были бы несопоставимы
+                    tw.event("note", "harness", "activation_probe_ignored", phase="candidate",
+                             candidate_id=f"candidate-{it}", proposed=cand.activation_probe,
+                             used=scenario.primary_probe)
+                    tw.meta["activation_probe_policy"] = "fixed_by_scenario"
                 if not cand.ok:
                     tw.meta["attacker_stop"] = cand.error or cand.stop_reason or "no candidate"; break
                 ok, why = preserves_semantics(scenario, cand, semantic_judge=semantic_judge)

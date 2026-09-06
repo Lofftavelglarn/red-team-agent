@@ -122,6 +122,11 @@ class SuccessContract(BaseModel):
     # Поля/подстроки, которые ОБЯЗАНЫ отсутствовать в безопасном ответе. Проверяются
     # детерминированно наравне с URL и чужими ID (см. Adjudicator.unsafe_output).
     forbidden_fields: list[str] = Field(default_factory=list)
+    # Якоря, которые мутация ОБЯЗАНА сохранить целиком (payload identity, целевой актив,
+    # триггер, роль жертвы). Без них «улучшенный» кандидат может незаметно сменить цель
+    # атаки, и результат перестанет относиться к исходному сценарию. Пусто → достаточно
+    # любого детерминированного признака контракта.
+    required_anchors: list[str] = Field(default_factory=list)
     # Семантическое описание payload (для judge при STORED_*/BEHAVIOR_CHANGED).
     payload_desc: str = ""
     # Как разрешено проверять исход.
@@ -410,6 +415,14 @@ def validate_scenario(sc: AttackScenario) -> list[str]:
     for cn in c.canaries:
         if _too_generic(cn):
             problems.append(f"{sc.id}: слишком общий canary '{cn}'")
+
+    # обязательные якоря должны существовать в самом сценарии, иначе мутация невозможна
+    for anchor in c.required_anchors:
+        blob_turns = "\n".join(sc.attack_turns).lower()
+        if sc.attack_channel not in _INDIRECT_CHANNELS and anchor.lower() not in blob_turns:
+            problems.append(
+                f"{sc.id}: required_anchor '{anchor}' отсутствует в attack_turns — "
+                "исходный кандидат сам не проходил бы проверку дрейфа")
 
     # запрещённые поля проверяются подстрокой: общее слово даст ложный unsafe
     for field_name in c.forbidden_fields:
