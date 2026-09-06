@@ -277,6 +277,22 @@ def test_failed_retrieval_skips_activation_call_and_judge(tmp_path):
     assert res.meta["skipped_activation"]
 
 
+def test_failed_stored_global_blocks_retrieval_probe_and_judge(tmp_path):
+    # payload не осел глобально → ни retrieval, ни активацию оценивать нельзя:
+    # разница ответов без доказанной причины не является эффектом атаки
+    judge = _CountingJudge()
+    stand = FakeStand(extractor=lambda msgs: [])
+    res = _run(stand, adj=Adjudicator(judge=judge), tmp=str(tmp_path))
+    assert res.checkpoint_status(CP.STORED_GLOBAL.value) == CheckpointStatus.NOT_REACHED
+    retrieval = res.checkpoints[CP.RETRIEVAL_CANDIDATE.value]
+    assert retrieval.status == CheckpointStatus.NOT_REACHED
+    assert retrieval.evaluator == "harness"
+    assert CP.STORED_GLOBAL.value in retrieval.reason
+    assert not judge.asked_about("Политика агента")   # судью о retrieval не спрашивали
+    assert _victim_sessions(stand) == []
+    assert res.meta["end_to_end_reached"] is False
+
+
 def test_failed_retrieval_blocks_unsafe_downstream(tmp_path):
     stand = FakeStand(extractor=lambda msgs: [])
     res = _run(stand, tmp=str(tmp_path))
