@@ -3,9 +3,17 @@ __pycache__/
 *.pyo
 .DS_Store
 .ipynb_checkpoints/
+.env
+.venv/
+.uv-bin/
+.uv-cache/
+.uv-python/
 
 # Логи прогонов: на каждый прогон своя подпапка с trace_*.json + report.* (локально, не в гит)
 runs/
 
 # Адаптеры под сторонние харнессы (PyRIT/promptfoo) — пока не используются
 adapters/
+
+# логи/мета веб-консоли — не версионируем
+webui/state/

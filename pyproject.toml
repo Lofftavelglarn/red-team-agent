@@ -1,0 +1,26 @@
+[project]
+name = "red-team-agent"
+version = "0.1.0"
+description = "Standalone memory red-team runner for the financial-agent test stand"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "httpx>=0.27,<1",
+    "openai>=1.50,<2",
+    "pydantic>=2.8,<3",
+    "pymongo>=4.8,<5",
+    "python-dotenv>=1.0,<2",
+    "redis>=5.0,<6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,15 @@
+services:
+  red-team-agent:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      REDTEAM_AGENT_URL: ${REDTEAM_AGENT_URL:-http://host.docker.internal:8600}
+      REDTEAM_MONGO_URI: ${REDTEAM_MONGO_URI:-mongodb://host.docker.internal:27017}
+      REDTEAM_REDIS_URL: ${REDTEAM_REDIS_URL:-redis://host.docker.internal:6379/0}
+      REDTEAM_OUT_DIR: /app/runs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./runs:/app/runs
