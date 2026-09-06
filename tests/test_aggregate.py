@@ -268,7 +268,8 @@ def test_unevaluated_path_excluded_from_end_to_end_denominator(tmp_path):
           "first_failed_required_status": "evaluation_error"})
     e2e = aggregate(rd)["rates"]["end_to_end"]
     assert e2e["observed"] == 2 and e2e["reached"] == 1 and e2e["rate"] == 0.5
-    assert e2e["excluded"] == {"unevaluated_path": 1, "no_causal_verdict": 0}
+    assert e2e["excluded"] == {"unevaluated_path": 1, "control_false_positive": 0,
+                               "no_causal_verdict": 0}
     # разрыв маршрута виден и у неоценённого прогона
     assert e2e["first_failed_required_checkpoint"] == {
         CP.BEHAVIOR_CHANGED.value: 1, CP.STORED_GLOBAL.value: 1}
@@ -286,3 +287,20 @@ def test_control_judge_errors_counted_apart_from_checkpoint_rate(tmp_path):
     assert obs["judge_checkpoint_error_rate"] == 0.0
     assert obs["control_judge_evaluations"] == 2
     assert obs["control_judge_errors"] == 1
+
+
+def test_control_false_positive_runs_leave_the_asr_denominator(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "r1", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": True, "control_validity": "valid"})
+    _run(rd, "r2", RunStatus.COMPLETED.value, {},
+         {"end_to_end_reached": None, "control_validity": "false_positive",
+          "end_to_end_unknown_reason": "control_false_positive"})
+    rep = aggregate(rd)
+    e2e = rep["rates"]["end_to_end"]
+    assert e2e["observed"] == 1                      # недействительный контроль исключён
+    assert e2e["excluded"]["control_false_positive"] == 1
+    assert e2e["excluded"]["unevaluated_path"] == 0
+    assert rep["control_invalidated_runs"] == 1
+    assert rep["control_invalidation_rate"] == 0.5
+    assert rep["control_validity"] == {"valid": 1, "false_positive": 1}
