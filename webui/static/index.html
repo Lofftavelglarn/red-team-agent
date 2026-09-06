@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Red-Team Agent — консоль атак</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <div>
+        <div class="brand-title">Red-Team Agent</div>
+        <div class="brand-sub">консоль атак на память финансового агента</div>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-view="run">Новый прогон</button>
+      <button class="tab" data-view="runs">Прогоны <span class="badge" id="runs-count"></span></button>
+    </nav>
+    <div class="target" id="target-summary" title="Конфигурация цели из .env"></div>
+  </header>
+
+  <main id="app">
+    <!-- ── Вид: настройка и запуск ─────────────────────────────────── -->
+    <section id="view-run" class="view">
+      <div class="run-grid">
+        <div class="col-scenarios card">
+          <div class="card-head">
+            <h2>Сценарии атак</h2>
+            <div class="sel-info"><span id="sel-count">0</span> выбрано</div>
+          </div>
+          <div class="toolbar">
+            <input id="scn-search" type="search" placeholder="поиск по названию / id / тегу…" />
+            <div class="chip-filters" id="sev-filters"></div>
+          </div>
+          <div class="quick">
+            <button class="link" data-quick="core">только core</button>
+            <button class="link" data-quick="enabled">все включённые</button>
+            <button class="link" data-quick="all">все (+требующие фикстур)</button>
+            <button class="link" data-quick="none">очистить</button>
+          </div>
+          <div id="scn-list" class="scn-list"></div>
+        </div>
+
+        <div class="col-params">
+          <div class="card params-card">
+            <div class="card-head"><h2>Параметры кампании</h2></div>
+
+            <label class="param">
+              <div class="param-top">
+                <span class="param-name">REDTEAM_LOOP</span>
+                <input id="p-loop" type="number" min="0" max="50" value="0" />
+              </div>
+              <div class="param-hint">response-guided мутаций после исходного кандидата.
+                <b>0</b> — статический прогон (без атакующей модели).</div>
+              <input id="p-loop-range" type="range" min="0" max="10" value="0" />
+            </label>
+
+            <label class="param">
+              <div class="param-top">
+                <span class="param-name">REDTEAM_REPEATS</span>
+                <input id="p-repeats" type="number" min="1" max="100" value="1" />
+              </div>
+              <div class="param-hint">повторов каждого сценария → ASR как частота успеха.</div>
+              <input id="p-repeats-range" type="range" min="1" max="20" value="1" />
+            </label>
+
+            <label class="param">
+              <div class="param-top">
+                <span class="param-name">REDTEAM_SEED</span>
+                <input id="p-seed" type="number" min="0" value="0" />
+              </div>
+              <div class="param-hint">seed перемешивания порядка сценариев (0 — без перемешивания).</div>
+            </label>
+
+            <label class="param toggle">
+              <input id="p-failfast" type="checkbox" checked />
+              <div>
+                <div class="param-name">REDTEAM_FAIL_FAST</div>
+                <div class="param-hint">оборвать всю кампанию, если хотя бы одна модель
+                  (attacker/judge) не ответила после ретраев. Иначе сбой модели → evaluation_error.</div>
+              </div>
+            </label>
+
+            <div class="estimate">
+              <div><span id="est-scn">0</span> сценариев × <span id="est-rep">1</span> повторов =
+                <b><span id="est-total">0</span></b> изолированных прогонов</div>
+            </div>
+
+            <div class="actions">
+              <button id="btn-doctor" class="btn ghost">Preflight</button>
+              <button id="btn-launch" class="btn primary">▶ Запустить кампанию</button>
+            </div>
+            <div id="launch-msg" class="launch-msg"></div>
+          </div>
+
+          <div class="card doctor-card" id="doctor-card" hidden>
+            <div class="card-head"><h2>Preflight</h2>
+              <button class="x" id="doctor-close">✕</button></div>
+            <pre id="doctor-out" class="doctor-out"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Монитор прогона: остаётся во вкладке запуска ──────────── -->
+      <div class="card monitor-card" id="mon-card" hidden>
+        <div class="mon-head">
+          <div class="live-title">
+            <span class="spinner" id="mon-spin"></span>
+            <span id="mon-id"></span>
+            <span class="pill" id="mon-status"></span>
+          </div>
+          <div class="mon-actions">
+            <button class="btn primary small" id="btn-openreport" hidden>Открыть отчёт →</button>
+            <button class="btn danger small" id="btn-stop">■ Остановить</button>
+            <button class="btn ghost small" id="btn-clearmon" title="Скрыть лог">✕</button>
+          </div>
+        </div>
+        <div id="mon-params" class="live-params"></div>
+        <pre id="mon-log" class="live-log"></pre>
+      </div>
+    </section>
+
+    <!-- ── Вид: список прогонов ────────────────────────────────────── -->
+    <section id="view-runs" class="view" hidden>
+      <div class="card">
+        <div class="card-head"><h2>История прогонов</h2>
+          <button class="btn ghost small" id="btn-refresh">Обновить</button></div>
+        <div id="runs-list" class="runs-list"></div>
+      </div>
+    </section>
+
+    <!-- ── Вид: отчёт ──────────────────────────────────────────────── -->
+    <section id="view-report" class="view" hidden>
+      <div class="detail-head">
+        <button class="btn ghost small" data-view="runs">← к прогонам</button>
+        <div class="live-title"><span id="rep-id"></span></div>
+        <div class="rep-actions">
+          <a id="dl-md" class="btn ghost small" href="#">report.md</a>
+          <a id="dl-json" class="btn ghost small" href="#">report.json</a>
+        </div>
+      </div>
+      <div id="report-body"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
