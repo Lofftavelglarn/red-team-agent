@@ -296,6 +296,24 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         attacker_calls = 0
         accepted_mutations = 0
         roles = {attacker: "attacker", victim: "victim", secondary: "secondary"}
+        # Контекст фазы для аудита судьи: сам adjudicator не знает, что сейчас оценивается.
+        judge_ctx = {"phase": "setup", "candidate_id": None}
+
+        def _judge_audit(record: dict) -> None:
+            """Каждый вызов судьи — событие judge_result с промптом и вердиктом.
+
+            Без него в трассе остаётся только итоговый статус чекпоинта, а перепроверить
+            решение судьи (и увидеть расхождение двух судей) невозможно."""
+            if tw.closed:
+                return
+            labels = {k: v for k, v in record.items() if k != "prompt"}
+            tw.event("judge_result", "evaluator", record.get("prompt", ""),
+                     phase=judge_ctx["phase"], candidate_id=judge_ctx["candidate_id"],
+                     **labels)
+
+        adj.audit = _judge_audit
+        if getattr(adj, "judge_model", None) is None:
+            adj.judge_model = manifest["models"].get("judge")
 
         def _chat(phase: str, user: str, session: str, text: str, *,
                   sink: str = "final_answer", **labels):
@@ -376,6 +394,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
             # candidate_state_policy управляет только основной цепочкой кандидатов.
             if scenario.benign_control_turns:
                 tw.event("note", "harness", "control_started", phase="control")
+                judge_ctx.update(phase="control", candidate_id=None)
                 c_session = f"{session_root}-control"
                 for i, text in enumerate(scenario.benign_control_turns):
                     _chat("control", attacker, c_session, text, sink="working_memory", turn=i)
@@ -494,6 +513,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                              phase="neutral", candidate_id=candidate_id,
                              neutral_sessions=scenario.neutral_sessions)
 
+                judge_ctx.update(phase="candidate", candidate_id=candidate_id)
                 cp: dict[str, tuple[Judgement, list[str]]] = {}
 
                 def _gated(name: str, evaluate, evidence: list[str]) -> Judgement:

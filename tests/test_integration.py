@@ -331,6 +331,22 @@ def test_every_phase_and_target_call_is_traced(tmp_path):
     assert {e["labels"].get("candidate_id") for e in candidate_events} == {"candidate-0"}
 
 
+def test_judge_calls_are_recorded_in_the_trace(tmp_path):
+    """Каждый вызов судьи попадает в трассу вместе с промптом и вердиктом."""
+    stand = FakeStand(extractor=_make_extractor("CANARY-7101"))
+    scn = _scn(canary="CANARY-7101")
+    res = _run(stand, adj=Adjudicator(judge=_NEUTRAL_JUDGE), scn=scn, tmp=str(tmp_path))
+    judged = [e for e in _events(tmp_path, res) if e["kind"] == "judge_result"]
+    assert judged, "вызовы судьи не записаны"
+    purposes = {e["labels"]["purpose"] for e in judged}
+    assert "unsafe" in purposes                     # оценка ответа жертвы
+    for e in judged:
+        assert e["labels"]["prompt_hash"].startswith("sha256:")
+        assert e["labels"]["verdict"] in ("reached", "not_reached", "abstain")
+        assert e["labels"]["phase"] in ("control", "candidate")
+        assert e["excerpt"]                          # сам промпт сохранён
+
+
 def test_failed_stored_global_blocks_retrieval_probe_and_judge(tmp_path):
     # payload не осел глобально → ни retrieval, ни активацию оценивать нельзя:
     # разница ответов без доказанной причины не является эффектом атаки

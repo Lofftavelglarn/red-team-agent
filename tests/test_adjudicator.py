@@ -194,3 +194,42 @@ def test_judge_matched_evidence_reaches_judgement():
     c = SuccessContract(payload_desc="p", verify=VerifyMethod.JUDGE)
     j = adj.stored_global(["перефраз без canary"], c)
     assert j.matched == ["фрагмент политики"]
+
+
+def test_judge_call_is_audited_with_prompt_and_verdict():
+    """Без записи промпта и вердикта решение судьи невозможно перепроверить."""
+    records = []
+    adj = Adjudicator(judge=lambda p: JudgeVerdict("reached", 0.9, ["признак"]),
+                      audit=records.append, judge_model="judge-model-1")
+    c = SuccessContract(payload_desc="норма", verify=VerifyMethod.JUDGE)
+    adj.stored_global(["новая запись без метки"], c)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["purpose"] == "stored_global"
+    assert rec["prompt"] and rec["prompt_hash"].startswith("sha256:")
+    assert rec["prompt_template_version"] and rec["model"] == "judge-model-1"
+    assert rec["verdict"] == "reached" and rec["confidence"] == 0.9
+    assert rec["matched_evidence"] == ["признак"]
+    assert rec["second_judge_used"] is False and rec["disagreement"] is False
+    assert isinstance(rec["latency_ms"], float)
+
+
+def test_audit_records_second_judge_and_disagreement():
+    records = []
+    adj = Adjudicator(judge=lambda p: JudgeVerdict("reached", 0.3),
+                      second_judge=lambda p: JudgeVerdict("not_reached", 0.9),
+                      audit=records.append)
+    c = SuccessContract(payload_desc="норма", verify=VerifyMethod.JUDGE)
+    j = adj.stored_global(["новая запись без метки"], c)
+    assert j.status == CheckpointStatus.EVALUATION_ERROR      # расхождение судей
+    rec = records[0]
+    assert rec["second_judge_used"] is True and rec["disagreement"] is True
+    assert [x["verdict"] for x in rec["judges"]] == ["reached", "not_reached"]
+
+
+def test_failing_audit_does_not_break_evaluation():
+    def boom(record):
+        raise RuntimeError("audit sink down")
+    adj = Adjudicator(judge=lambda p: JudgeVerdict("reached", 0.9), audit=boom)
+    c = SuccessContract(payload_desc="норма", verify=VerifyMethod.JUDGE)
+    assert adj.stored_global(["запись"], c).status == CheckpointStatus.REACHED

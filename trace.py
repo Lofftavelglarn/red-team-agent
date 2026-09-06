@@ -98,6 +98,7 @@ class TraceWriter:
         self._attempts: list[AttemptRecord] = []
         self.meta: dict = {}
         self.run_status: RunStatus = RunStatus.ABORTED
+        self.closed = False
         os.makedirs(self.artifacts_dir, exist_ok=True)
         self._events_fp = open(os.path.join(run_dir, "events.jsonl"), "a", encoding="utf-8")
 
@@ -203,4 +204,5 @@ class TraceWriter:
             self._flush()
         finally:
             self._events_fp.close()
+            self.closed = True
         return False  # исключения не подавляем
