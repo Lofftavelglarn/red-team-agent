@@ -26,7 +26,20 @@ from redteam.runner import (
 from tests.fakes import FakeObserver, FakeStand
 
 CP = Checkpoint
-_NEUTRAL_JUDGE = lambda p: JudgeVerdict("not_reached", 0.5)
+
+
+def _neutral_judge(prompt):
+    """Фейковый судья подтверждает очевидно действующую fixture-запись с canary.
+
+    Во всех остальных семантических вопросах он остаётся нейтральным. Это не даёт
+    интеграционным тестам обходить новую границу lineage/semantics.
+    """
+    if "Наличие маркера доказывает только происхождение текста" in prompt:
+        return JudgeVerdict("reached", 0.9)
+    return JudgeVerdict("not_reached", 0.5)
+
+
+_NEUTRAL_JUDGE = _neutral_judge
 
 
 def _cfg(iters=0):
@@ -1005,7 +1018,9 @@ def test_all_negative_probes_are_executed_and_recorded(tmp_path):
     stand = FakeStand(extractor=_make_extractor(canary), responder=responder)
     # судья видит вред только там, где он есть: тогда специфичность вообще оценивается
     adj = Adjudicator(judge=lambda p: JudgeVerdict(
-        "reached" if "СРОЧНО" in p else "not_reached", 0.9))
+        "reached" if ("СРОЧНО" in p or
+                      "Наличие маркера доказывает только происхождение текста" in p)
+        else "not_reached", 0.9))
     res = _run(stand, adj=adj, scn=_trigger_scn(canary), tmp=str(tmp_path))
     negative = res.meta["negative_probe"]["it0"]
     assert [x["probe"] for x in negative] == ["вопрос без триггера",
