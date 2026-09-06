@@ -6,7 +6,12 @@
   events.jsonl обнаруживается `python -m redteam.trace validate <run-dir>`;
 - чекпоинты (`CheckpointResult`) ссылаются на `event_id`, а не копируют текст;
 - крупные payload'ы выносятся в `artifacts/`, в событии остаётся excerpt + hash;
-- чувствительные данные редактируются в отчёте, но доступны в локальном raw artifact;
+- политика raw/redacted (одна и та же для всех событий, без исключений по длине):
+  events.jsonl и trace.json ВСЕГДА содержат отредактированную выжимку; полный текст
+  лежит в `artifacts/raw/`, если включён REDTEAM_STORE_RAW=1 (по умолчанию), и артефакт
+  создаётся не только для длинных payload'ов, но и всегда, когда редакция изменила
+  текст; из raw-артефакта убираются только credentials (ключи и заголовки авторизации);
+  при REDTEAM_STORE_RAW=0 raw-артефактов нет вовсе и отчёт их не обещает;
 - трасса сохраняется ДАЖЕ при исключении (см. `TraceWriter.__exit__`);
 - инфраструктурная ошибка фиксируется отдельным run-статусом, а не как неуспех.
 
@@ -44,8 +49,8 @@ def content_hash(text: str) -> str:
     return "sha256:" + hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:32]
 
 
-# Грубая редакция ПДн/секретов в отчётной выжимке (raw-артефакт не редактируется).
-def redact(text: str) -> str:
+# Credentials — единственное, что не сохраняется НИГДЕ, включая raw-артефакт.
+def redact_secrets(text: str) -> str:
     import re
     if not text:
         return text
@@ -53,9 +58,15 @@ def redact(text: str) -> str:
     # ключи и заголовки авторизации из raw-исключений судьи/цели
     t = re.sub(r"(?i)\b(authorization|api[-_]?key|x-api-key)\b\s*[:=]\s*\S+",
                r"\1=<redacted>", t)
-    t = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", "sk-<redacted>", t)
-    t = re.sub(r"\b\d{8,}\b", "<redacted-id>", t)
-    return t
+    return re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", "sk-<redacted>", t)
+
+
+# Редакция отчётной выжимки: credentials + длинные идентификаторы (ПДн стенда).
+def redact(text: str) -> str:
+    import re
+    if not text:
+        return text
+    return re.sub(r"\b\d{8,}\b", "<redacted-id>", redact_secrets(text))
 
 
 @dataclass
@@ -98,7 +109,7 @@ class TraceWriter:
 
     def __init__(self, run_dir: str, scenario_id: str, run_id: str,
                  manifest: dict, artifact_threshold: int = 2000,
-                 redact_report: bool = True):
+                 redact_report: bool = True, store_raw: bool = True):
         self.run_dir = run_dir
         self.scenario_id = scenario_id
         self.run_id = run_id
@@ -108,6 +119,8 @@ class TraceWriter:
         self.manifest.setdefault("run_id", run_id)
         self.artifact_threshold = artifact_threshold
         self.redact_report = redact_report
+        self.store_raw = store_raw
+        self.manifest["raw_artifacts_enabled"] = bool(store_raw)
         self.events: list[Event] = []
         self._seq = 0
         self._checkpoints: dict[str, CheckpointResult] = {}
@@ -125,7 +138,7 @@ class TraceWriter:
     # --- пути ---
     @property
     def artifacts_dir(self) -> str:
-        return os.path.join(self.run_dir, "artifacts")
+        return os.path.join(self.run_dir, "artifacts", "raw")
 
     # --- запись событий ---
     def event(self, kind: str, actor: str, content: str, *, source: str = "",
@@ -136,10 +149,14 @@ class TraceWriter:
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
         raw_artifact = None
         excerpt = text
-        if len(text) > self.artifact_threshold:
-            raw_artifact = os.path.join("artifacts", f"{eid}.txt")
+        truncated = len(text) > self.artifact_threshold
+        # Артефакт нужен не только длинному тексту: если редакция изменила выжимку,
+        # без него исходное содержимое события нельзя восстановить вообще.
+        if self.store_raw and (truncated or (self.redact_report and redact(text) != text)):
+            raw_artifact = os.path.join("artifacts", "raw", f"{eid}.txt")
             with open(os.path.join(self.run_dir, raw_artifact), "w", encoding="utf-8") as f:
-                f.write(text)
+                f.write(redact_secrets(text))
+        if truncated:
             excerpt = text[: self.artifact_threshold] + " …[truncated]"
         ev = Event(
             event_id=eid, sequence=self._seq,
@@ -343,9 +360,27 @@ def validate_campaign(run_dir: str) -> dict:
     return {"ok": not failed, "runs": len(reports), "failed": len(failed), "reports": reports}
 
 
+def purge_raw(run_dir: str) -> int:
+    """Удалить raw-артефакты прогона или кампании (retention вручную).
+
+    Выжимка, чекпоинты и цепочка целостности остаются; validate после этого сообщит
+    об отсутствующих артефактах — это ожидаемо и отражает реальную политику хранения."""
+    removed = 0
+    for current, _dirs, files in os.walk(run_dir):
+        if os.path.basename(current) != "raw":
+            continue
+        for name in files:
+            os.remove(os.path.join(current, name))
+            removed += 1
+    return removed
+
+
 def main(argv: list[str]) -> None:
+    if len(argv) >= 2 and argv[0] == "purge-raw":
+        print(f"удалено raw-артефактов: {purge_raw(argv[1])}")
+        return
     if not argv or argv[0] != "validate" or len(argv) < 2:
-        print("использование: python -m redteam.trace validate <run-dir>")
+        print("использование: python -m redteam.trace validate|purge-raw <run-dir>")
         raise SystemExit(2)
     target = argv[1]
     report = (validate_run(target) if os.path.exists(os.path.join(target, "manifest.json"))

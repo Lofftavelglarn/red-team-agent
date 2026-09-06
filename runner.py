@@ -241,7 +241,8 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
     os.makedirs(run_subdir, exist_ok=True)
     tw = TraceWriter(run_subdir, scenario.id, run_id, manifest,
                      artifact_threshold=cfg.trace.artifact_threshold,
-                     redact_report=cfg.trace.redact_report)
+                     redact_report=cfg.trace.redact_report,
+                     store_raw=cfg.trace.store_raw)
 
     attacker = cfg.attacker_user
     victim = cfg.victim_user

@@ -61,8 +61,8 @@ def test_large_payload_offloaded_to_artifact(tmp_path):
     with TraceWriter(d, "x", "r", _manifest(), artifact_threshold=100) as tw:
         eid = tw.event("target_response", "victim", big)
         tw.run_status = RunStatus.COMPLETED
-    assert os.path.exists(os.path.join(d, "artifacts", f"{eid}.txt"))
-    raw = open(os.path.join(d, "artifacts", f"{eid}.txt"), encoding="utf-8").read()
+    assert os.path.exists(os.path.join(d, "artifacts", "raw", f"{eid}.txt"))
+    raw = open(os.path.join(d, "artifacts", "raw", f"{eid}.txt"), encoding="utf-8").read()
     assert raw == big
 
 
@@ -168,8 +168,8 @@ def test_validate_detects_missing_artifact(tmp_path):
     with TraceWriter(run_dir, "s1", "r2", {}, artifact_threshold=10) as tw:
         tw.event("note", "harness", "очень длинный текст события для выноса в артефакт")
         tw.run_status = RunStatus.COMPLETED
-    artifacts = os.listdir(os.path.join(run_dir, "artifacts"))
-    os.remove(os.path.join(run_dir, "artifacts", artifacts[0]))
+    raw_dir = os.path.join(run_dir, "artifacts", "raw")
+    os.remove(os.path.join(raw_dir, os.listdir(raw_dir)[0]))
     report = validate_run(run_dir)
     assert not report["ok"]
     assert any("артефакт" in p for p in report["problems"])
@@ -185,3 +185,47 @@ def test_validate_detects_checkpoint_pointing_nowhere(tmp_path):
     report = validate_run(run_dir)
     assert not report["ok"]
     assert any("несуществующие события" in p for p in report["problems"])
+
+
+def test_redacted_short_text_still_has_raw_artifact(tmp_path):
+    """Обещание «полный текст доступен в raw» обязано выполняться и для коротких строк."""
+    d = str(tmp_path)
+    with TraceWriter(d, "x", "r", _manifest()) as tw:
+        eid = tw.event("target_response", "victim", "счёт клиента 10678901 закрыт")
+        tw.run_status = RunStatus.COMPLETED
+    events = [json.loads(l) for l in
+              open(os.path.join(d, "events.jsonl"), encoding="utf-8").read().strip().splitlines()]
+    assert "<redacted-id>" in events[0]["excerpt"]          # выжимка редактирована
+    raw = open(os.path.join(d, "artifacts", "raw", f"{eid}.txt"), encoding="utf-8").read()
+    assert "10678901" in raw                               # полный текст сохранён
+
+
+def test_credentials_never_reach_raw_artifacts(tmp_path):
+    d = str(tmp_path)
+    with TraceWriter(d, "x", "r", _manifest()) as tw:
+        eid = tw.event("infra_error", "harness",
+                       "HTTPError(headers={'Authorization': 'Bearer sk-genai-SECRET123'})")
+        tw.run_status = RunStatus.COMPLETED
+    raw = open(os.path.join(d, "artifacts", "raw", f"{eid}.txt"), encoding="utf-8").read()
+    assert "SECRET123" not in raw and "<redacted>" in raw
+
+
+def test_disabled_raw_storage_writes_no_artifacts(tmp_path):
+    d = str(tmp_path)
+    with TraceWriter(d, "x", "r", _manifest(), artifact_threshold=10, store_raw=False) as tw:
+        tw.event("target_response", "victim", "счёт клиента 10678901 закрыт и это длинный текст")
+        tw.run_status = RunStatus.COMPLETED
+    manifest = json.load(open(os.path.join(d, "manifest.json"), encoding="utf-8"))
+    assert manifest["raw_artifacts_enabled"] is False      # отчёт не обещает raw
+    assert os.listdir(os.path.join(d, "artifacts", "raw")) == []
+
+
+def test_purge_raw_removes_only_artifacts(tmp_path):
+    from redteam.trace import purge_raw
+    d = _run_dir_with_trace(tmp_path)
+    with TraceWriter(d, "s1", "r3", _manifest(), artifact_threshold=5) as tw:
+        tw.event("note", "harness", "длинный текст для артефакта")
+        tw.run_status = RunStatus.COMPLETED
+    assert purge_raw(d) >= 1
+    assert os.listdir(os.path.join(d, "artifacts", "raw")) == []
+    assert os.path.exists(os.path.join(d, "events.jsonl"))

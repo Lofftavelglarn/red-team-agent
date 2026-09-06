@@ -46,6 +46,9 @@ KEEP_FINAL_STATE = os.getenv("REDTEAM_KEEP_FINAL_STATE") == "1"
 # неожиданно большого стенда: при превышении состояние объявляется непроверяемым, а не
 # хэшируется по части документов.
 FINGERPRINT_DOC_LIMIT = int(os.getenv("REDTEAM_FINGERPRINT_DOC_LIMIT", "5000"))
+# Хранить ли полный текст событий в artifacts/raw. Выключение экономит место и убирает
+# нередактированные данные стенда с диска; выжимка событий не меняется.
+STORE_RAW = os.getenv("REDTEAM_STORE_RAW", "1") != "0"
 
 
 def safe_mongo_uri(uri: str = MONGO_URI) -> str:
@@ -127,6 +130,7 @@ def target_api_keys() -> dict[str, str]:
 class TraceOptions:
     artifact_threshold: int = 2000
     redact_report: bool = True
+    store_raw: bool = STORE_RAW
 
 
 @dataclass
