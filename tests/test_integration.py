@@ -679,6 +679,34 @@ def test_attempts_are_written_to_result_json(tmp_path):
     assert saved["attempts"][1]["checkpoints"][CP.STORED_GLOBAL.value] == "reached"
 
 
+def test_attempt_event_references_have_the_declared_kinds(tmp_path):
+    canary = "CANARY-8502"
+    scn = _trigger_scn(canary)
+    stand = FakeStand(extractor=_make_extractor(canary),
+                      responder=_poison_responder(canary))
+    res = _run(stand, scn=scn, tmp=str(tmp_path))
+    run_dir = tmp_path / res.run_id
+    attempt = json.loads((run_dir / "attempts.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    events = {e["event_id"]: e for e in _events(tmp_path, res)}
+
+    for eid in attempt["attack_request_event_ids"]:
+        assert events[eid]["kind"] == "target_request"
+        assert events[eid]["labels"]["phase"] == "candidate"
+    for eid in attempt["attack_response_event_ids"]:
+        assert events[eid]["kind"] == "target_response"
+        assert events[eid]["labels"]["phase"] == "candidate"
+    assert events[attempt["input_delivery_event_id"]]["kind"] == "note"
+    assert events[attempt["finalize_event_id"]]["kind"] == "finalize_result"
+    assert events[attempt["memory_snapshot_event_id"]]["kind"] == "memory_snapshot"
+    if attempt["activation_request_event_id"]:
+        assert events[attempt["activation_request_event_id"]]["kind"] == "target_request"
+        assert events[attempt["activation_response_event_id"]]["kind"] == "target_response"
+    assert all(events[eid]["kind"] == "target_request"
+               for eid in attempt["negative_request_event_ids"])
+    assert all(events[eid]["kind"] == "target_response"
+               for eid in attempt["negative_response_event_ids"])
+
+
 def _control_sessions(stand):
     return [row for row in stand.chat_log if "-control" in row[1]]
 

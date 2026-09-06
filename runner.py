@@ -600,10 +600,15 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 # поздние мутации за обращения, потраченные их предшественниками.
                 calls_before_candidate = target_calls
                 turn_obs: list[TurnObservation] = []
+                attack_request_eids: list[str] = []
+                attack_response_eids: list[str] = []
                 for i, text in enumerate(turns):
-                    r, _, _ = _chat("candidate", attacker, atk_session, text,
-                                    sink="working_memory", turn=i,
-                                    candidate_id=candidate_id, iteration=it)
+                    r, request_eid, response_eid = _chat(
+                        "candidate", attacker, atk_session, text,
+                        sink="working_memory", turn=i,
+                        candidate_id=candidate_id, iteration=it)
+                    attack_request_eids.append(request_eid)
+                    attack_response_eids.append(response_eid)
                     turn_obs.append(TurnObservation(text, r["content"]))
                 input_eid = tw.event("note", "harness", "input delivered", phase="candidate",
                                      session_id=atk_session, candidate_id=candidate_id)
@@ -668,7 +673,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 gate = prerequisite_block(cp, required, activation_cp) if activation_cp else None
                 irrelevant = Judgement(CheckpointStatus.NOT_APPLICABLE,
                                        reason="вне expected_path сценария", evaluator="harness")
-                post, vres, post_eid = "", None, None
+                post, vres, activation_request_eid, post_eid = "", None, None, None
                 if activation_cp is None or gate is not None:
                     # probe не отправляем: цель не вызывается, судья не вызывается,
                     # target_calls не растут (ТЗ P0-2).
@@ -684,9 +689,10 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                         cp[name] = (stub if name in expected else irrelevant, [])
                 else:
                     v_session = f"{session_root}-victim-{it}"
-                    vres, _, post_eid = _chat("activation", trigger_user, v_session,
-                                              scenario.primary_probe, probe_index=0,
-                                              candidate_id=candidate_id, iteration=it)
+                    vres, activation_request_eid, post_eid = _chat(
+                        "activation", trigger_user, v_session,
+                        scenario.primary_probe, probe_index=0,
+                        candidate_id=candidate_id, iteration=it)
                     post = vres["content"]
                     # чекпоинт вне expected_path не оцениваем вовсе — судья не тратится
                     if CP.BEHAVIOR_CHANGED.value in expected:
@@ -708,12 +714,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 neg_results: list[dict] = []
                 if scenario.negative_probes and vres is not None:
                     for idx, probe in enumerate(scenario.negative_probes):
-                        neg_res, _, neg_eid = _chat(
+                        neg_res, neg_request_eid, neg_eid = _chat(
                             "negative", trigger_user, f"{session_root}-negative-{it}-{idx}",
                             probe, probe_index=idx, candidate_id=candidate_id, iteration=it)
                         neg_j = adj.unsafe_output(neg_res["content"], contract)
                         neg_results.append({"probe": probe, "status": neg_j.status.value,
-                                            "reason": neg_j.reason, "event_id": neg_eid})
+                                            "reason": neg_j.reason,
+                                            "request_event_id": neg_request_eid,
+                                            "response_event_id": neg_eid,
+                                            # evidence_id сохраняется как alias ответа для
+                                            # checkpoint-контракта и старых отчётов.
+                                            "event_id": neg_eid})
                     tw.meta.setdefault("negative_probe", {})[f"it{it}"] = neg_results
                 if CP.TRIGGER_SPECIFICITY.value in expected:
                     _gated(CP.TRIGGER_SPECIFICITY.value,
@@ -755,9 +766,17 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                                    "target_calls": target_calls,
                                    "candidate_target_calls": candidate_target_calls,
                                    "candidate_id": candidate_id,
-                                   "request_event_ids": [input_eid, fin_eid],
-                                   "activation_event_ids": [e for e in [post_eid] if e],
-                                   "negative_event_ids": [x["event_id"] for x in neg_results]})
+                                   "attack_request_event_ids": attack_request_eids,
+                                   "attack_response_event_ids": attack_response_eids,
+                                   "input_delivery_event_id": input_eid,
+                                   "finalize_event_id": fin_eid,
+                                   "memory_snapshot_event_id": snap_eid,
+                                   "activation_request_event_id": activation_request_eid,
+                                   "activation_response_event_id": post_eid,
+                                   "negative_request_event_ids":
+                                       [x["request_event_id"] for x in neg_results],
+                                   "negative_response_event_ids":
+                                       [x["response_event_id"] for x in neg_results]})
 
                 improved = sc > best_score
                 best_score = max(best_score, sc)
