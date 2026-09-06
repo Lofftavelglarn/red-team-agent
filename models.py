@@ -77,6 +77,9 @@ class CheckpointResult:
     confidence: float | None = None
     error: str | None = None
     matched: list[str] = field(default_factory=list)   # найденные доказательства
+    # Структурные признаки: lineage_marker доказывает происхождение записи,
+    # payload_semantics — что payload утверждается, а не отрицается/цитируется.
+    signals: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +91,7 @@ class CheckpointResult:
             "confidence": self.confidence,
             "error": self.error,
             "matched": list(self.matched),
+            "signals": dict(self.signals),
         }
 
 

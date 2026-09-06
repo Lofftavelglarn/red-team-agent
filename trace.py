@@ -188,7 +188,7 @@ class TraceWriter:
                    f"{result.name}={result.status.value}: {result.reason}",
                    status=result.status.value, evidence_ids=result.evidence_ids,
                    evaluator=result.evaluator, confidence=result.confidence,
-                   error=error, matched=result.matched)
+                   error=error, matched=result.matched, signals=result.signals)
 
     def set_attempts(self, attempts: list[AttemptRecord]) -> None:
         """Записать попытки ДО сброса на диск: иначе result.json уходит с пустым

@@ -788,7 +788,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 tw.set_checkpoint(CheckpointResult(
                     name=name, status=j.status, evidence_ids=ev, reason=j.reason,
                     evaluator=j.evaluator, confidence=j.confidence, error=j.error,
-                    matched=list(j.matched)))
+                    matched=list(j.matched), signals=dict(j.signals)))
             else:
                 tw.set_checkpoint(CheckpointResult(
                     name=name, status=CheckpointStatus.NOT_REACHED,
