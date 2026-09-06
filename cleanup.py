@@ -56,13 +56,6 @@ _COLLECTIONS = {
     "semantic": "semantic_memories",
     "policies": "agent_policy_memories",
 }
-# Стабильный идентификатор документа в каждом слое — по нему сортируем перед хэшированием.
-_DOC_KEYS = {
-    "dialog": "session_id",
-    "episodic": "episode_id",
-    "semantic": "fact_id",
-    "policies": "policy_id",
-}
 
 # Fingerprint абсолютно чистого состояния: все слои по нулям. Оставлен для
 # совместимости; актуальная проверка изоляции — сравнение с baseline кампании.
@@ -168,6 +161,29 @@ class MemoryAdmin:
         return self._redis_client
 
     # ---------- fingerprint ----------
+    def collection_state(self, collection: str) -> dict:
+        """Число документов и digest содержимого ВСЕЙ коллекции.
+
+        Усечение выборки здесь недопустимо: fingerprint по первым N документам не
+        меняется при появлении (N+1)-го, и очистка, оставившая артефакт, всё равно
+        подтвердила бы изоляцию. Поэтому при превышении `doc_limit` состояние
+        объявляется непроверяемым, а не считается по части коллекции.
+
+        Хэшируется отсортированный список хэшей документов: порядок выдачи Mongo между
+        запросами не гарантирован, а такой digest от него не зависит и, в отличие от
+        суммы/XOR, различает повторяющиеся документы.
+        """
+        digests: list[str] = []
+        for doc in self.db[collection].find({}, {"_id": 0}):
+            digests.append(_digest(dict(doc)))
+            if len(digests) > self.doc_limit:
+                raise ResetError(
+                    f"{collection}: документов больше лимита {self.doc_limit}; "
+                    "fingerprint по усечённой выборке не доказывает изоляцию — "
+                    "очистите стенд или поднимите REDTEAM_FINGERPRINT_DOC_LIMIT")
+        digests.sort()
+        return {"count": len(digests), "digest": _digest(digests)}
+
     def layer_state(self) -> dict:
         """Состояние каждого слоя: количество документов И digest их содержимого.
 
@@ -178,14 +194,7 @@ class MemoryAdmin:
         """
         state: dict = {}
         for layer, collection in _COLLECTIONS.items():
-            docs = []
-            for doc in self.db[collection].find({}, {"_id": 0}):
-                docs.append(dict(doc))
-                if len(docs) >= self.doc_limit:
-                    break
-            key = _DOC_KEYS[layer]
-            docs.sort(key=lambda d: str(d.get(key, "")))
-            state[layer] = {"count": len(docs), "digest": _digest(docs)}
+            state[layer] = self.collection_state(collection)
         try:
             keys = sorted(_as_text(k) for k in self.redis.scan_iter(match="working:*"))
         except Exception as exc:  # noqa: BLE001 — уцелевшая рабочая память = грязное состояние
@@ -194,11 +203,13 @@ class MemoryAdmin:
         return state
 
     def fingerprint(self, user_ids: list[str] | None = None) -> str:
-        """Короткий хэш состояния всех слоёв (counts + digests)."""
-        try:
-            return _digest(self.layer_state())
-        except ResetError:
-            return "sha256:REDIS_UNAVAILABLE"
+        """Короткий хэш состояния всех слоёв (counts + digests).
+
+        Ошибку не глушим: одинаковая заглушка до и после очистки совпала бы с такой же
+        заглушкой baseline и подтвердила бы изоляцию, которой не было. Вызывающая
+        сторона обязана считать непрочитанное состояние загрязнённым.
+        """
+        return _digest(self.layer_state())
 
     # ---------- scoped ----------
     def campaign_sessions(self, scope: CampaignScope) -> list[str]:
@@ -318,7 +329,8 @@ def restore(admin: MemoryAdmin, scope: CampaignScope, *, operation: str,
     выполнялась конкретная фаза опыта. Credentials в receipt не попадают.
     """
     receipt = {"operation": operation, "mode": mode, "campaign_id": scope.campaign_id,
-               "started_at": _now(), "deleted": {}, "errors": []}
+               "started_at": _now(), "deleted": {}, "errors": [],
+               "fingerprint_before": None, "fingerprint_after": None}
     receipt.update(labels)
     try:
         receipt["fingerprint_before"] = admin.fingerprint()

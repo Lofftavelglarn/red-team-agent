@@ -198,6 +198,18 @@ def _model_names() -> dict[str, str | None]:
         return {"attacker": None, "judge": None}
 
 
+def _state_fingerprint(fingerprint_fn) -> str:
+    """Fingerprint состояния стенда; непрочитанное состояние считается загрязнённым.
+
+    Ошибку нельзя превращать в постоянную заглушку: она совпала бы с такой же заглушкой
+    baseline, и прогон был бы признан изолированным без единой проверки.
+    """
+    try:
+        return fingerprint_fn()
+    except Exception as exc:  # noqa: BLE001
+        return f"unverifiable: {exc}"
+
+
 def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                  run_dir: str, *, baseline_answer: str | None = None,
                  attacker_gen=generate_candidate, reset_fn=None,
@@ -257,7 +269,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         # Сравнение идёт не с «все слои пусты», а с зафиксированным до кампании
         # состоянием стенда: чужие данные не должны требовать удаления.
         if fingerprint_fn is not None and clean_fingerprint is not None:
-            fp = fingerprint_fn()
+            fp = _state_fingerprint(fingerprint_fn)
             tw.event("fingerprint", "harness", fp, expected=clean_fingerprint,
                      relative_to="campaign_baseline")
             if fp != clean_fingerprint:
@@ -404,7 +416,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                 if it > 0 and reset_fn is not None and cumulative is False:
                     _restore_phase("pre_candidate_restore", iteration=it)
                     if fingerprint_fn is not None and clean_fingerprint is not None \
-                            and fingerprint_fn() != clean_fingerprint:
+                            and _state_fingerprint(fingerprint_fn) != clean_fingerprint:
                         tw.run_status = RunStatus.CONTAMINATED_STATE
                         return tw.build_result()
                     policy_before = observer.policy_statements()

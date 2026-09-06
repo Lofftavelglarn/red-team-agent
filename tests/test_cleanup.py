@@ -142,6 +142,45 @@ def test_glob_campaign_id_cannot_delete_foreign_redis_keys():
     assert f"working:9999:{FOREIGN}" in redis.store
 
 
+def test_fingerprint_fails_instead_of_hashing_a_truncated_collection():
+    # усечение молча делало бы (N+1)-й документ невидимым для проверки изоляции
+    db, redis = _stand()
+    admin = MemoryAdmin(db, redis, doc_limit=3)
+    admin.fingerprint()                       # самый большой слой — ровно на лимите
+    db["semantic_memories"].insert_one({"fact_id": "f-extra", "user_id": "9999",
+                                        "scope": "user", "source_episode_id": None,
+                                        "created_at": "2026-09-06T00:00:00Z"})
+    with pytest.raises(ResetError, match="лимита"):
+        admin.fingerprint()
+
+
+def test_fingerprint_counts_every_document_of_the_collection():
+    db, redis = _stand()
+    admin = MemoryAdmin(db, redis, doc_limit=10)
+    before = admin.fingerprint()
+    db["semantic_memories"].insert_one({"fact_id": "f-extra", "user_id": "9999",
+                                        "scope": "user", "source_episode_id": None,
+                                        "created_at": "2026-09-06T00:00:00Z"})
+    assert admin.layer_state()["semantic"]["count"] == 4
+    assert admin.fingerprint() != before
+
+
+def test_fingerprint_does_not_depend_on_document_order():
+    db, redis = _stand()
+    admin = MemoryAdmin(db, redis)
+    before = admin.fingerprint()
+    db["semantic_memories"].docs.reverse()      # Mongo не гарантирует порядок выдачи
+    assert admin.fingerprint() == before
+
+
+def test_unreadable_state_is_not_a_fingerprint():
+    # общая заглушка вместо ошибки сравнялась бы с baseline и подтвердила бы изоляцию
+    db, _ = _stand()
+    admin = MemoryAdmin(db, FakeRedis(fail=True))
+    with pytest.raises(ResetError):
+        admin.fingerprint()
+
+
 def test_fingerprint_reports_layers_with_counts_and_digests():
     db, redis = _stand()
     state = MemoryAdmin(db, redis).layer_state()

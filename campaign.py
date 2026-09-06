@@ -27,6 +27,7 @@ import uuid
 from redteam.config import (
     ALLOW_FULL_RESET,
     CLEANUP_MODE,
+    FINGERPRINT_DOC_LIMIT,
     KEEP_FINAL_STATE,
     MONGO_DB,
     OUT_DIR,
@@ -70,7 +71,7 @@ def run_campaign(scenario_ids: list[str], repeats: int, cfg: RunConfig,
     mode = resolve_cleanup_mode(cfg.cleanup_mode)
     summary = cleanup_summary(mode)
     print("  очистка: " + ", ".join(f"{k}={v}" for k, v in summary.items()), flush=True)
-    admin = admin if admin is not None else MemoryAdmin()
+    admin = admin if admin is not None else MemoryAdmin(doc_limit=FINGERPRINT_DOC_LIMIT)
     # доступность хранилищ проверяем до разрушительных операций
     try:
         admin.layer_state()

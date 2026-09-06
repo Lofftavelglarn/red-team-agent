@@ -42,6 +42,10 @@ CLEANUP_MODE = os.getenv("REDTEAM_CLEANUP_MODE", "scoped").strip().lower() or "s
 ALLOW_FULL_RESET = os.getenv("REDTEAM_ALLOW_FULL_RESET") == "1"
 # Отладочный режим: не восстанавливать состояние после кампании.
 KEEP_FINAL_STATE = os.getenv("REDTEAM_KEEP_FINAL_STATE") == "1"
+# Fingerprint изоляции считается по ВСЕЙ коллекции. Лимит защищает от сканирования
+# неожиданно большого стенда: при превышении состояние объявляется непроверяемым, а не
+# хэшируется по части документов.
+FINGERPRINT_DOC_LIMIT = int(os.getenv("REDTEAM_FINGERPRINT_DOC_LIMIT", "5000"))
 
 
 def safe_mongo_uri(uri: str = MONGO_URI) -> str:
