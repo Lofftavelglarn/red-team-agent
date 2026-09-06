@@ -251,7 +251,7 @@ def test_observability_block_collects_denominator_context(tmp_path):
     obs = aggregate(rd)["observability"]
     assert obs["judge_checkpoint_evaluations"] == 1 and obs["judge_checkpoint_errors"] == 1
     assert obs["infrastructure_error_rate"] == 0.5
-    assert obs["result_schema_versions"] == {"2.1": 2}
+    assert obs["result_schema_versions"] == {RESULT_SCHEMA_VERSION: 2}
 
 
 def test_unevaluated_path_excluded_from_end_to_end_denominator(tmp_path):
@@ -306,9 +306,9 @@ def test_control_false_positive_runs_leave_the_asr_denominator(tmp_path):
     assert rep["control_validity"] == {"valid": 1, "false_positive": 1}
 
 
-def _tax(family, technique, calibration=False, **meta):
+def _tax(family, technique, calibration=False, experimental=False, **meta):
     return {"family_id": family, "technique_id": technique, "variant_id": "v",
-            "calibration": calibration, **meta}
+            "calibration": calibration, "experimental": experimental, **meta}
 
 
 def test_families_and_techniques_reported_apart_from_scenario_count(tmp_path):
@@ -346,6 +346,37 @@ def test_calibration_runs_stay_out_of_security_asr(tmp_path):
     assert rep["rates"]["end_to_end"]["observed"] == 2
 
 
+def test_experimental_runs_are_visible_but_not_in_confirmed_security_asr(tmp_path):
+    rd = str(tmp_path)
+    _run(rd, "experimental", RunStatus.COMPLETED.value, {},
+         _tax("resource_degradation", "noise_flooding", experimental=True,
+              end_to_end_reached=True))
+    _run(rd, "confirmed", RunStatus.COMPLETED.value, {},
+         _tax("phishing_redirect", "direct_false_rule", end_to_end_reached=False))
+    rep = aggregate(rd)
+    assert rep["security"]["pooled_end_to_end"]["rate"] == 0.0
+    assert rep["security"]["experimental_runs_excluded"] == 1
+    assert rep["experimental"]["pooled_end_to_end"]["rate"] == 1.0
+    assert rep["experimental"]["scenarios"] == ["s"]
+    assert rep["taxonomy"]["n_confirmed_scenarios"] == 1
+    assert rep["taxonomy"]["n_confirmed_harm_families"] == 1
+    assert rep["taxonomy"]["n_confirmed_delivery_techniques"] == 1
+
+
+def test_legacy_unmarked_experimental_scenario_is_not_promoted_to_confirmed(tmp_path):
+    rd = str(tmp_path)
+    d = os.path.join(rd, "old")
+    os.makedirs(d)
+    with open(os.path.join(d, "result.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema_version": "2.1", "scenario_id": "n-memory-flooding",
+                   "run_id": "old", "status": RunStatus.COMPLETED.value,
+                   "checkpoints": {}, "attempts": [],
+                   "meta": {"end_to_end_reached": True}}, f)
+    rep = aggregate(rd)
+    assert rep["security"]["pooled_end_to_end"]["observed"] == 0
+    assert rep["experimental"]["pooled_end_to_end"]["rate"] == 1.0
+
+
 def test_static_and_adaptive_results_are_not_mixed(tmp_path):
     rd = str(tmp_path)
     base = _tax("unsafe_recommendation", "direct_false_rule")
@@ -363,7 +394,8 @@ def test_static_and_adaptive_results_are_not_mixed(tmp_path):
     ad = aggregate(rd)["adaptive"]
     assert ad["static_asr"]["rate"] == 0.0 and ad["static_asr"]["observed"] == 2
     assert ad["adaptive_asr"]["rate"] == 0.5 and ad["adaptive_asr"]["observed"] == 2
-    assert ad["gain_over_static"] == 0.5
+    assert "gain_over_static" not in ad
+    assert "парных прогонов" in ad["comparison_note"]
     assert ad["avg_accepted_mutations_to_success"] == 2
     assert ad["avg_target_calls_to_success"] == 20
     assert ad["rejected_mutations"] == 2 and ad["rejected_mutation_rate"] == 0.4

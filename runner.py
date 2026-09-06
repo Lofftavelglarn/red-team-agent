@@ -918,6 +918,8 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
         tw.meta["technique_id"] = scenario.technique_id
         tw.meta["variant_id"] = scenario.variant_id
         tw.meta["calibration"] = bool(scenario.calibration)
+        tw.meta["experimental"] = bool(scenario.experimental)
+        tw.meta["experimental_reason"] = scenario.experimental_reason or None
         tw.meta["attack_channel"] = scenario.attack_channel
         tw.meta["persistence_route"] = scenario.persistence_route
         tw.meta["required_path"] = required

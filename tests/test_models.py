@@ -57,6 +57,18 @@ def test_missing_control_flagged():
     assert any("benign control" in p for p in problems)
 
 
+def test_experimental_scenario_requires_reason():
+    assert any("experimental_reason" in p for p in validate_scenario(
+        _base(experimental=True)))
+
+
+def test_runner_probe_cardinality_is_explicitly_validated():
+    assert any("ровно один activation_probe" in p for p in validate_scenario(
+        _base(activation_probes=["один", "два"])))
+    assert any("не более одного benign_control_probe" in p for p in validate_scenario(
+        _base(benign_control_probes=["один", "два"])))
+
+
 def test_generic_canary_flagged():
     sc = _base(attack_turns=["риск"], success_contract=SuccessContract(canaries=["риск"]))
     problems = validate_scenario(sc)

@@ -227,11 +227,15 @@ class AttackScenario(BaseModel):
     objective: str
     # Классификация: family_id — вид ущерба, technique_id — способ доставки,
     # variant_id — конкретный вариант внутри пары. calibration=True помечает безопасный
-    # проверочный сценарий, который НЕ входит в security ASR.
+    # проверочный сценарий. experimental=True — сценарий уже исполняется и полезен для
+    # диагностики, но runner пока не доказывает заявленный отличительный механизм;
+    # оба типа не входят в подтверждённый security ASR.
     family_id: str = ""
     technique_id: str = ""
     variant_id: str = ""
     calibration: bool = False
+    experimental: bool = False
+    experimental_reason: str = ""
     severity: str = "medium"           # low | medium | high | critical
     attack_channel: str                # direct_chat | indirect_web | multi_session | ...
     persistence_route: str             # user | global | none | cumulative
@@ -401,6 +405,18 @@ def validate_scenario(sc: AttackScenario) -> list[str]:
             problems.append(f"{sc.id}: не задан variant_id — вариант нельзя отличить "
                             "от самостоятельного класса атаки")
 
+    if sc.experimental and not sc.experimental_reason.strip():
+        problems.append(f"{sc.id}: experimental=True без experimental_reason")
+    if not sc.experimental and sc.experimental_reason.strip():
+        problems.append(f"{sc.id}: experimental_reason задан без experimental=True")
+
+    # Runner сравнивает один фиксированный activation probe с baseline и выполняет
+    # один probe benign-контроля. Не позволяем каталогу молча обещать другую политику.
+    if len(sc.activation_probes) != 1:
+        problems.append(f"{sc.id}: runner поддерживает ровно один activation_probe")
+    if len(sc.benign_control_probes) > 1:
+        problems.append(f"{sc.id}: runner поддерживает не более одного benign_control_probe")
+
     if Checkpoint.TRIGGER_SPECIFICITY.value in sc.expected_path and not sc.negative_probes:
         problems.append(
             f"{sc.id}: TRIGGER_SPECIFICITY в expected_path без negative_probes — "
@@ -514,8 +530,8 @@ def validate_suite(scenarios: list[AttackScenario]) -> None:
 
 
 # --- Результаты попытки и запуска ---
-# 2.1: meta несёт required_path/candidate_attempts, control — полные исходы проверок.
-RESULT_SCHEMA_VERSION = "2.1"
+# 2.2: meta различает подтверждённые, калибровочные и experimental-сценарии.
+RESULT_SCHEMA_VERSION = "2.2"
 
 
 class RunStatus(str, Enum):
