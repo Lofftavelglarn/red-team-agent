@@ -20,6 +20,7 @@ control → (опц. seed безопасного правила) → репли�
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import subprocess
 import time
@@ -179,24 +180,75 @@ def _end_to_end_verdict(checkpoints: dict,
     return False, name, status.value
 
 
-def _commit_hash() -> str | None:
+def _git(*args: str) -> str | None:
     try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+        out = subprocess.run(["git", *args], cwd=os.path.dirname(__file__),
                              capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or None
+        return out.stdout.strip()
     except Exception:  # noqa: BLE001
         return None
 
 
-def _model_names() -> dict[str, str | None]:
-    try:
-        from redteam.config import model_config
-        return {
-            "attacker": model_config("attacker").model or None,
-            "judge": model_config("judge").model or None,
-        }
-    except Exception:  # noqa: BLE001
-        return {"attacker": None, "judge": None}
+def _commit_hash() -> str | None:
+    return _git("rev-parse", "HEAD") or None
+
+
+def _code_state() -> dict:
+    """Состояние кода на момент прогона: коммит и наличие незакоммиченных правок.
+
+    Без dirty-флага коммит доказывает лишь ветку, а не тот код, который выполнялся."""
+    status = _git("status", "--porcelain")
+    return {"commit": _commit_hash(),
+            "dirty": None if status is None else bool(status.strip())}
+
+
+def _model_names() -> dict[str, dict]:
+    """Параметры моделей БЕЗ ключей: имя, endpoint, температура, лимиты.
+
+    Постановку опыта нельзя повторить, зная только имя модели: температура и лимит
+    токенов меняют и атакующего, и судью."""
+    empty = {"model": None, "base_url": None, "temperature": None,
+             "max_tokens": None, "timeout_s": None}
+    out = {}
+    for role in ("attacker", "judge"):
+        try:
+            from redteam.config import model_config
+            mc = model_config(role)
+            out[role] = {"model": mc.model or None, "base_url": mc.base_url,
+                         "temperature": mc.temperature, "max_tokens": mc.max_tokens,
+                         "timeout_s": mc.timeout_s}
+        except Exception:  # noqa: BLE001
+            out[role] = dict(empty)
+    return out
+
+
+def _runtime_versions() -> dict:
+    """Версии Python и пакетов, влияющих на поведение прогона."""
+    import platform
+    from importlib import metadata
+    versions = {"python": platform.python_version()}
+    for name in ("pydantic", "httpx", "openai", "pymongo", "redis"):
+        try:
+            versions[name] = metadata.version(name)
+        except Exception:  # noqa: BLE001
+            versions[name] = None
+    return versions
+
+
+def scenario_snapshot(scenario) -> dict:
+    """Полная сериализация сценария и её хеш.
+
+    scenario_id недостаточно: тексты реплик, probe'ы, контракт и бюджеты меняются, и
+    старый прогон перестаёт быть сопоставим с новым определением того же сценария."""
+    from redteam.adjudicator import JUDGE_PROMPT_VERSION
+    from redteam.attacker import ATTACKER_SYSTEM
+    from redteam.trace import content_hash
+
+    dump = scenario.model_dump(mode="json")
+    return {"scenario": dump,
+            "scenario_hash": content_hash(json.dumps(dump, sort_keys=True, ensure_ascii=False)),
+            "prompt_versions": {"judge": JUDGE_PROMPT_VERSION,
+                                "attacker_system": content_hash(ATTACKER_SYSTEM)}}
 
 
 def _state_fingerprint(fingerprint_fn) -> str:
@@ -234,8 +286,13 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
                             "max_target_calls": scenario.budgets.max_target_calls,
                             "max_attacker_calls": scenario.budgets.max_attacker_calls,
                             "no_improvement_patience": scenario.budgets.no_improvement_patience},
-                "commit": _commit_hash(), "models": _model_names(),
+                "seed": cfg.seed,
+                "code": _code_state(), "commit": _commit_hash(),
+                "models": _model_names(), "runtime": _runtime_versions(),
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    # Постановка эксперимента целиком: по manifest.json прогон воспроизводится без
+    # обращения к текущему коду сценариев.
+    manifest.update(scenario_snapshot(scenario))
 
     run_subdir = os.path.join(run_dir, run_id)
     os.makedirs(run_subdir, exist_ok=True)
@@ -314,7 +371,7 @@ def run_scenario(target, observer, adj: Adjudicator, scenario, cfg: RunConfig,
 
         adj.audit = _judge_audit
         if getattr(adj, "judge_model", None) is None:
-            adj.judge_model = manifest["models"].get("judge")
+            adj.judge_model = (manifest["models"].get("judge") or {}).get("model")
 
         def _chat(phase: str, user: str, session: str, text: str, *,
                   sink: str = "final_answer", **labels):

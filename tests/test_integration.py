@@ -938,3 +938,25 @@ def test_seed_without_contract_cannot_be_confirmed(tmp_path):
     res = run_scenario(stand, FakeObserver(stand), Adjudicator(judge=_NEUTRAL_JUDGE), scn,
                        _cfg(), str(tmp_path), reset_fn=stand.reset)
     assert res.status == RunStatus.SETUP_ERROR
+
+
+def test_manifest_snapshots_the_whole_setup(tmp_path):
+    """Постановку опыта обязано быть видно из manifest.json, а не из текущего кода."""
+    scn = _scn(canary="CANARY-7200")
+    stand = FakeStand(extractor=_make_extractor("CANARY-7200"))
+    res = _run(stand, scn=scn, tmp=str(tmp_path))
+    manifest = json.load(open(os.path.join(str(tmp_path), res.run_id, "manifest.json"),
+                              encoding="utf-8"))
+    snapshot = manifest["scenario"]
+    assert snapshot["attack_turns"] == scn.attack_turns
+    assert snapshot["activation_probes"] == scn.activation_probes
+    assert snapshot["success_contract"]["canaries"] == ["CANARY-7200"]
+    assert snapshot["required_path"] == scn.required_path
+    assert snapshot["budgets"]["max_iterations"] == scn.budgets.max_iterations
+    assert manifest["scenario_hash"].startswith("sha256:")
+    assert manifest["prompt_versions"]["judge"]
+    assert manifest["runtime"]["python"]
+    assert set(manifest["models"]) == {"attacker", "judge"}
+    assert "temperature" in manifest["models"]["judge"]
+    assert "dirty" in manifest["code"]
+    assert manifest["seed"] == 0
